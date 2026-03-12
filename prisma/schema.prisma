@@ -1,0 +1,64 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  title     String
+  content   String?
+  published Boolean  @default(false)
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// LLM 服务商配置
+model LLMConfig {
+  id           String   @id @default(cuid())
+  name         String   @default("default") // 配置名称
+  provider     String   @default("openai") // 服务商: openai, custom
+  apiKey       String   // API Key
+  baseUrl      String?  // 自定义 API 地址
+  model        String   @default("gpt-4o-mini") // 模型名称
+  temperature  Float    @default(0.7) // 温度参数
+  maxTokens    Int      @default(4096) // 最大 token 数
+  databaseType String   @default("mysql") // 目标数据库类型
+  isActive     Boolean  @default(true) // 是否激活
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  @@unique([name]) // 确保只有一个默认配置
+}
+
+// 问答历史记录
+model History {
+  id           String   @id @default(cuid())
+  question     String   // 用户输入的需求
+  result       String   // AI 分析结果 (JSON 字符串)
+  databaseType String   // 目标数据库类型
+  provider     String   // 使用的 LLM 服务商
+  model        String   // 使用的模型
+  status       String   @default("success") // 状态: success, failed
+  errorMessage String?  // 错误信息
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
