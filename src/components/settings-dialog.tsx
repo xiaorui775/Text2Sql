@@ -200,15 +200,32 @@ export default function SettingsDialog({ onConfigChange }: SettingsDialogProps) 
   const saveAllConfigs = async () => {
     setSaving(true)
     try {
-      const activeConfig = configs.find(c => c.isActive)
-      if (!activeConfig && configs.length > 0) {
+      let currentConfigs = [...configs]
+
+      // 自动保存正在编辑的内容
+      if (editingConfigId) {
+        if (!editForm.apiKey && !editForm.hasApiKey) {
+          toast.error('正在编辑的模型未配置 API Key')
+          setSaving(false)
+          return
+        }
+
+        if (editingConfigId === 'new') {
+          currentConfigs.push(editForm)
+        } else {
+          currentConfigs = currentConfigs.map(c => c.id === editingConfigId ? editForm : c)
+        }
+      }
+
+      const activeConfig = currentConfigs.find(c => c.isActive)
+      if (!activeConfig && currentConfigs.length > 0) {
           toast.error('请选择一个激活的配置')
           setSaving(false)
           return
       }
 
       const payload = {
-          configs: configs,
+          configs: currentConfigs,
           databaseType: databaseType
       }
 
@@ -220,6 +237,8 @@ export default function SettingsDialog({ onConfigChange }: SettingsDialogProps) 
 
       if (response.ok) {
         toast.success('配置保存成功')
+        setConfigs(currentConfigs) // 更新本地状态
+        setEditingConfigId(null) // 清除编辑状态
         setOpen(false)
         onConfigChange?.()
       } else {

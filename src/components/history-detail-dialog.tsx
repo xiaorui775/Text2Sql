@@ -109,19 +109,19 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
               </TabsContent>
 
               <TabsContent value="er" className="h-full m-0">
-                <ScrollArea className="h-full w-full rounded-md border p-4">
-                  {item.status === 'success' && parsedResult ? (
-                    <ERDiagram 
-                      tables={parsedResult.tables || []} 
-                      relations={parsedResult.relations || []} 
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2">
-                      <AlertCircle className="h-8 w-8" />
-                      <p>{item.errorMessage || '无法显示 ER 图'}</p>
-                    </div>
-                  )}
-                </ScrollArea>
+                {item.status === 'success' && parsedResult ? (
+                  <ERDiagram 
+                    tables={parsedResult.tables || []} 
+                    relations={parsedResult.relations || []}
+                    fullHeight={true}
+                    className="h-full"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2 border rounded-md">
+                    <AlertCircle className="h-8 w-8" />
+                    <p>{item.errorMessage || '无法显示 ER 图'}</p>
+                  </div>
+                )}
               </TabsContent>
 
               <TabsContent value="sql" className="h-full m-0">

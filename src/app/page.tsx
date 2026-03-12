@@ -13,6 +13,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import ERDiagram from '@/components/er-diagram'
 import SettingsDialog from '@/components/settings-dialog'
+import { ErrorDialog } from '@/components/error-dialog'
 
 interface TableField {
   name: string
@@ -61,6 +62,7 @@ export default function Home() {
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [copiedSql, setCopiedSql] = useState(false)
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
+  const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
 
   // 检查配置状态
   const checkConfig = useCallback(async () => {
@@ -111,7 +113,8 @@ export default function Home() {
       toast.success('分析完成')
     } catch (error) {
       console.error('Error:', error)
-      toast.error(error instanceof Error ? error.message : '分析过程中出现错误，请重试')
+      const message = error instanceof Error ? error.message : '分析过程中出现错误，请重试'
+      setErrorDialog({ open: true, message })
     } finally {
       setIsLoading(false)
     }
@@ -356,6 +359,12 @@ export default function Home() {
           <p>基于 AI 大模型，自动将产品需求转换为数据库设计方案</p>
         </footer>
       </div>
+      {/* Error Dialog */}
+      <ErrorDialog 
+        open={errorDialog.open} 
+        onOpenChange={(open) => setErrorDialog(prev => ({ ...prev, open }))}
+        message={errorDialog.message}
+      />
     </div>
   )
 }

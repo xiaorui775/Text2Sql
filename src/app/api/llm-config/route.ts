@@ -16,12 +16,12 @@ export async function GET() {
       })
     }
 
-    // 处理配置列表，掩码 API Key
+    // 处理配置列表，不再掩码 API Key，由前端控制显示
     const safeConfigs = configs.map(config => ({
       id: config.id,
       name: config.name || 'Default Config',
       provider: config.provider,
-      apiKey: config.apiKey ? `${config.apiKey.slice(0, 8)}...${config.apiKey.slice(-4)}` : '',
+      apiKey: config.apiKey || '', // 返回完整 Key
       hasApiKey: !!config.apiKey,
       baseUrl: config.baseUrl || '',
       model: config.model,
@@ -84,12 +84,8 @@ export async function PUT(request: NextRequest) {
       for (const config of configs) {
         const existing = existingConfigMap.get(config.id)
         
-        let apiKeyToSave = config.apiKey
-        
-        // 处理 API Key：如果前端传回的是掩码且存在旧配置，则使用旧 Key
-        if (existing && config.hasApiKey && (!config.apiKey || config.apiKey.includes('...'))) {
-            apiKeyToSave = existing.apiKey
-        }
+        // 直接使用前端传来的 apiKey，不再进行特殊掩码判断逻辑
+        const apiKeyToSave = config.apiKey
 
         const configData = {
           name: config.name || 'Config',
