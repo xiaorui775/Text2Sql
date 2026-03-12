@@ -295,9 +295,12 @@ export default function ERDiagram({ tables, relations }: ERDiagramProps) {
             } else {
               // 水平方向连接
               fromX = isFromRight ? fromPos.x : fromPos.x + fromPos.width
-              fromY = fromPos.y + headerHeight + fromFieldIndex * rowHeight + rowHeight / 2
+              // 修正Y轴坐标计算：headerHeight + fieldIndex * rowHeight + rowHeight / 2
+              // 字段行起始Y = 40 + index * 28
+              // 行中心Y = 起始Y + 14
+              fromY = fromPos.y + headerHeight + fromFieldIndex * rowHeight + 14
               toX = isFromRight ? toPos.x + toPos.width : toPos.x
-              toY = toPos.y + headerHeight + toFieldIndex * rowHeight + rowHeight / 2
+              toY = toPos.y + headerHeight + toFieldIndex * rowHeight + 14
             }
             
             // 计算贝塞尔曲线控制点

@@ -1,47 +1,44 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 
-// GET - 获取 LLM 配置
+// GET - 获取 LLM 配置列表
 export async function GET() {
   try {
-    const config = await db.lLMConfig.findFirst({
-      where: { isActive: true }
+    const configs = await db.lLMConfig.findMany({
+      orderBy: { createdAt: 'desc' }
     })
 
-    if (!config) {
-      // 返回默认配置模板
+    if (configs.length === 0) {
       return NextResponse.json({
         exists: false,
-        config: {
-          provider: 'openai',
-          apiKey: '',
-          baseUrl: '',
-          model: 'gpt-4o-mini',
-          temperature: 0.7,
-          maxTokens: 4096,
-          databaseType: 'mysql'
-        }
+        configs: [],
+        databaseType: 'mysql'
       })
     }
 
-    // 不返回完整的 API Key，只返回掩码版本
-    const maskedApiKey = config.apiKey 
-      ? `${config.apiKey.slice(0, 8)}...${config.apiKey.slice(-4)}`
-      : ''
+    // 处理配置列表，掩码 API Key
+    const safeConfigs = configs.map(config => ({
+      id: config.id,
+      name: config.name || 'Default Config',
+      provider: config.provider,
+      apiKey: config.apiKey ? `${config.apiKey.slice(0, 8)}...${config.apiKey.slice(-4)}` : '',
+      hasApiKey: !!config.apiKey,
+      baseUrl: config.baseUrl || '',
+      model: config.model,
+      temperature: config.temperature,
+      maxTokens: config.maxTokens,
+      isActive: config.isActive,
+      // 数据库类型现在作为全局配置返回，这里仅保留兼容性
+    }))
+
+    // 获取当前激活配置的数据库类型，如果未激活则取第一个
+    const activeConfig = configs.find(c => c.isActive) || configs[0]
+    const databaseType = activeConfig.databaseType || 'mysql'
 
     return NextResponse.json({
       exists: true,
-      config: {
-        id: config.id,
-        provider: config.provider,
-        apiKey: maskedApiKey,
-        hasApiKey: !!config.apiKey,
-        baseUrl: config.baseUrl || '',
-        model: config.model,
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-        databaseType: config.databaseType || 'mysql'
-      }
+      configs: safeConfigs,
+      databaseType: databaseType
     })
   } catch (error) {
     console.error('Failed to get LLM config:', error)
@@ -52,81 +49,79 @@ export async function GET() {
   }
 }
 
-// PUT - 保存 LLM 配置
+// PUT - 保存 LLM 配置列表
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json()
-    const { provider, apiKey, baseUrl, model, temperature, maxTokens, databaseType, keepExistingKey } = body
+    const { configs, databaseType } = body
 
-    // 检查是否已有配置
-    const existingConfig = await db.lLMConfig.findFirst()
-
-    // 验证必填字段
-    if (!existingConfig && (!apiKey || apiKey.trim() === '')) {
+    if (!Array.isArray(configs)) {
       return NextResponse.json(
-        { error: 'API Key 不能为空' },
+        { error: '无效的配置数据格式' },
         { status: 400 }
       )
     }
 
-    // 如果不保留现有 key 且没有提供新 key
-    if (existingConfig && !keepExistingKey && (!apiKey || apiKey.trim() === '')) {
-      return NextResponse.json(
-        { error: 'API Key 不能为空' },
-        { status: 400 }
-      )
-    }
+    // 开启事务处理
+    await db.$transaction(async (tx) => {
+      // 1. 获取现有所有配置，用于对比 API Key
+      const existingConfigs = await tx.lLMConfig.findMany()
+      const existingConfigMap = new Map(existingConfigs.map(c => [c.id, c]))
 
-    let config
-    if (existingConfig) {
-      // 更新现有配置
-      const updateData: Record<string, unknown> = {
-        provider: provider || 'openai',
-        baseUrl: baseUrl || null,
-        model: model || 'gpt-4o-mini',
-        temperature: temperature ?? 0.7,
-        maxTokens: maxTokens ?? 4096,
-        databaseType: databaseType || 'mysql'
-      }
+      // 2. 删除所有旧配置 (简单粗暴但有效，或者可以做增量更新)
+      // 为了保持 ID 稳定，我们选择 update 或 create，删除不在列表中的
       
-      // 如果提供了新的 API Key，则更新
-      if (apiKey && apiKey.trim() !== '') {
-        updateData.apiKey = apiKey.trim()
-      }
-      
-      config = await db.lLMConfig.update({
-        where: { id: existingConfig.id },
-        data: updateData
-      })
-    } else {
-      // 创建新配置
-      config = await db.lLMConfig.create({
-        data: {
-          name: 'default',
-          provider: provider || 'openai',
-          apiKey: apiKey.trim(),
-          baseUrl: baseUrl || null,
-          model: model || 'gpt-4o-mini',
-          temperature: temperature ?? 0.7,
-          maxTokens: maxTokens ?? 4096,
-          databaseType: databaseType || 'mysql',
-          isActive: true
+      const incomingIds = new Set(configs.map(c => c.id).filter(id => id && !id.startsWith('new-'))) // 假设前端生成 UUID
+
+      // 删除不在新列表中的配置
+      await tx.lLMConfig.deleteMany({
+        where: {
+          id: { notIn: Array.from(incomingIds) }
         }
       })
-    }
+
+      // 更新或创建配置
+      for (const config of configs) {
+        const existing = existingConfigMap.get(config.id)
+        
+        let apiKeyToSave = config.apiKey
+        
+        // 处理 API Key：如果前端传回的是掩码且存在旧配置，则使用旧 Key
+        if (existing && config.hasApiKey && (!config.apiKey || config.apiKey.includes('...'))) {
+            apiKeyToSave = existing.apiKey
+        }
+
+        const configData = {
+          name: config.name || 'Config',
+          provider: config.provider || 'openai',
+          apiKey: apiKeyToSave,
+          baseUrl: config.baseUrl || null,
+          model: config.model || 'gpt-4o-mini',
+          temperature: config.temperature ?? 0.7,
+          maxTokens: config.maxTokens ?? 4096,
+          isActive: config.isActive || false,
+          databaseType: databaseType || 'mysql' // 将全局数据库类型保存到每个配置中，或仅保存到激活配置
+        }
+
+        if (existing) {
+          await tx.lLMConfig.update({
+            where: { id: config.id },
+            data: configData
+          })
+        } else {
+          await tx.lLMConfig.create({
+            data: {
+              ...configData,
+              id: config.id // 使用前端生成的 UUID 或让 DB 生成
+            }
+          })
+        }
+      }
+    })
 
     return NextResponse.json({
       success: true,
-      message: '配置保存成功',
-      config: {
-        id: config.id,
-        provider: config.provider,
-        baseUrl: config.baseUrl,
-        model: config.model,
-        temperature: config.temperature,
-        maxTokens: config.maxTokens,
-        databaseType: config.databaseType
-      }
+      message: '配置保存成功'
     })
   } catch (error) {
     console.error('Failed to save LLM config:', error)
@@ -139,6 +134,7 @@ export async function PUT(request: NextRequest) {
     )
   }
 }
+
 
 // DELETE - 删除 LLM 配置
 export async function DELETE() {
