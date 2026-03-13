@@ -66,7 +66,8 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   
   const padding = 16
   const gap = 12
-  const typeX = 12 + maxNameWidth + gap
+  const nameStartX = 48 // Increased to accommodate PK/FK indicators
+  const typeX = nameStartX + maxNameWidth + gap
   const tableWidth = Math.max(180, typeX + maxTypeWidth + padding)
   
   const rowHeight = 28
@@ -270,7 +271,9 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
                   {table.fields.map((field, fieldIndex) => (
                     <g key={field.name}>
                       <rect y={40 + fieldIndex * 28} width={pos.width} height="28" fill={fieldIndex % 2 === 0 ? 'transparent' : 'rgba(241, 245, 249, 0.5)'} />
-                      <text x={12} y={40 + fieldIndex * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{field.name}</text>
+                      {field.isPrimary && <text x={12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#059669" fontFamily="monospace">PK</text>}
+                      {field.isForeign && <text x={field.isPrimary ? 30 : 12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#3b82f6" fontFamily="monospace">FK</text>}
+                      <text x={48} y={40 + fieldIndex * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{field.name}</text>
                       <text x={pos.typeX} y={40 + fieldIndex * 28 + 20} fontSize="10" fill="#94a3b8" textAnchor="start">{field.type}{field.isNullable ? '' : '*'}</text>
                     </g>
                   ))}

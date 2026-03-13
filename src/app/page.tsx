@@ -56,9 +56,20 @@ const DATABASE_LABELS: Record<string, string> = {
   clickhouse: 'ClickHouse'
 }
 
+const LOADING_MESSAGES = [
+  "正在分析业务需求...",
+  "正在构建数据库模型...",
+  "设计表结构与关系...",
+  "生成 SQL 建表语句...",
+  "正在优化字段类型...",
+  "绘制 ER 关系图...",
+  "即将完成..."
+]
+
 export default function Home() {
   const [requirement, setRequirement] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [loadingMessage, setLoadingMessage] = useState(LOADING_MESSAGES[0])
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [copiedSql, setCopiedSql] = useState(false)
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
@@ -79,6 +90,19 @@ export default function Home() {
   useEffect(() => {
     checkConfig()
   }, [checkConfig])
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout
+    if (isLoading) {
+      let index = 0
+      setLoadingMessage(LOADING_MESSAGES[0])
+      interval = setInterval(() => {
+        index = (index + 1) % LOADING_MESSAGES.length
+        setLoadingMessage(LOADING_MESSAGES[index])
+      }, 3000)
+    }
+    return () => clearInterval(interval)
+  }, [isLoading])
 
   const analyzeRequirement = useCallback(async () => {
     if (!requirement.trim()) {
@@ -201,12 +225,12 @@ export default function Home() {
                 <Button
                   onClick={analyzeRequirement}
                   disabled={isLoading || !requirement.trim() || hasConfig === false}
-                  className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white shadow-lg shadow-emerald-500/25 px-6"
+                  className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white shadow-lg shadow-emerald-500/25 px-6 min-w-[140px]"
                 >
                   {isLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      生成中...
+                      {loadingMessage}
                     </>
                   ) : (
                     <>

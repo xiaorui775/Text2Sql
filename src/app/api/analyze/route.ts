@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 
+// Allow for longer timeouts
+export const maxDuration = 300; // 5 minutes
+
 // 数据库特定的 SQL 语法指南
 const DATABASE_SYNTAX: Record<string, string> = {
   mysql: `
@@ -148,7 +151,7 @@ async function callLLM(config: LLMConfig, userMessage: string): Promise<string> 
   const systemPrompt = getSystemPrompt(config.databaseType)
 
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 60000) // 60s timeout
+  const timeoutId = setTimeout(() => controller.abort(), 300000) // 300s timeout
 
   try {
     const response = await fetch(url, {
@@ -204,7 +207,7 @@ async function callLLM(config: LLMConfig, userMessage: string): Promise<string> 
   } catch (error) {
     clearTimeout(timeoutId)
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('LLM API 调用超时 (60s)')
+      throw new Error('LLM API 调用超时 (300s)，请尝试简化需求或稍后重试')
     }
     throw error
   }
@@ -232,6 +235,36 @@ export async function POST(request: NextRequest) {
         { error: '请先配置 LLM 服务', needConfig: true },
         { status: 400 }
       )
+    }
+
+    // 检查是否有缓存的成功记录 (最近 24 小时内的相同需求)
+    const cachedHistory = await db.history.findFirst({
+      where: {
+        question: requirement,
+        status: 'success',
+        databaseType: llmConfig.databaseType || 'mysql',
+        createdAt: {
+          gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // 24 hours ago
+        }
+      },
+      orderBy: {
+        createdAt: 'desc'
+      }
+    })
+
+    if (cachedHistory) {
+      try {
+        const cachedResult = JSON.parse(cachedHistory.result)
+        // 更新历史记录时间，使其出现在顶部
+        await db.history.update({
+          where: { id: cachedHistory.id },
+          data: { createdAt: new Date() }
+        })
+        return NextResponse.json(cachedResult)
+      } catch (e) {
+        console.error('Failed to parse cached result:', e)
+        // 如果解析失败，继续执行 LLM 调用
+      }
     }
 
     // 调用 LLM
