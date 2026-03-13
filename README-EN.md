@@ -31,7 +31,7 @@ Text2SQL is an intelligent development tool that transforms natural language req
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/text2sql.git
+   git clone https://github.com/xiaorui775/Text2Sql.git
    cd text2sql
    ```
 
