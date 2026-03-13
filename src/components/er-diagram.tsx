@@ -59,7 +59,7 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
     
     table.fields.forEach(field => {
       maxNameWidth = Math.max(maxNameWidth, field.name.length * 7)
-      const typeStr = field.type + (field.isNullable ? '' : '*')
+      const typeStr = field.type
       maxTypeWidth = Math.max(maxTypeWidth, typeStr.length * 6)
     })
   })
@@ -274,7 +274,7 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
                       {field.isPrimary && <text x={12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#059669" fontFamily="monospace">PK</text>}
                       {field.isForeign && <text x={field.isPrimary ? 30 : 12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#3b82f6" fontFamily="monospace">FK</text>}
                       <text x={48} y={40 + fieldIndex * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{field.name}</text>
-                      <text x={pos.typeX} y={40 + fieldIndex * 28 + 20} fontSize="10" fill="#94a3b8" textAnchor="start">{field.type}{field.isNullable ? '' : '*'}</text>
+                      <text x={pos.typeX} y={40 + fieldIndex * 28 + 20} fontSize="10" fill="#94a3b8" textAnchor="start">{field.type}</text>
                     </g>
                   ))}
                 </g>

@@ -88,7 +88,7 @@ function getSystemPrompt(databaseType: string): string {
 3. 定义表之间的关系
 4. 生成符合 ${databaseType.toUpperCase()} 语法的建表语句
 
-请严格按照以下JSON格式返回结果，不要包含任何其他文字：
+请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式（如 \`\`\`json ... \`\`\`），不要包含任何额外的解释文字，直接返回纯 JSON 字符串**：
 
 {
   "keyPoints": ["关键点1", "关键点2", ...],
@@ -291,18 +291,29 @@ export async function POST(request: NextRequest) {
     // 解析 JSON 响应
     let result
     try {
-      // 清理响应 - 移除可能的 markdown 代码块标记
+      // 更加健壮的 JSON 提取逻辑
       let cleanedContent = responseContent.trim()
-      if (cleanedContent.startsWith('```json')) {
-        cleanedContent = cleanedContent.slice(7)
-      } else if (cleanedContent.startsWith('```')) {
-        cleanedContent = cleanedContent.slice(3)
-      }
-      if (cleanedContent.endsWith('```')) {
-        cleanedContent = cleanedContent.slice(0, -3)
-      }
-      cleanedContent = cleanedContent.trim()
       
+      // 1. 尝试匹配 ```json ... ``` 代码块
+      const jsonBlockMatch = cleanedContent.match(/```json\s*([\s\S]*?)\s*```/)
+      if (jsonBlockMatch) {
+        cleanedContent = jsonBlockMatch[1]
+      } else {
+        // 2. 尝试匹配 ``` ... ``` 代码块
+        const codeBlockMatch = cleanedContent.match(/```\s*([\s\S]*?)\s*```/)
+        if (codeBlockMatch) {
+          cleanedContent = codeBlockMatch[1]
+        }
+      }
+
+      // 3. 如果还是无法解析，尝试提取最外层的 {}
+      // 这一步是为了应对开头或结尾有额外文字的情况
+      const firstBrace = cleanedContent.indexOf('{')
+      const lastBrace = cleanedContent.lastIndexOf('}')
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        cleanedContent = cleanedContent.substring(firstBrace, lastBrace + 1)
+      }
+
       result = JSON.parse(cleanedContent)
     } catch (parseError) {
       console.error('Failed to parse JSON:', parseError)
