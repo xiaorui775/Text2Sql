@@ -13,8 +13,8 @@ import { format } from "date-fns"
 import { Clock, Database, Brain, AlertCircle } from "lucide-react"
 import ERDiagram from "./er-diagram"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useMemo, useState, useEffect } from "react"
-import { Loader2 } from "lucide-react"
+import { useMemo } from "react"
+import DesignDocMarkdown from "./design-doc-markdown"
 
 interface HistoryDetailDialogProps {
   open: boolean
@@ -33,20 +33,6 @@ interface HistoryDetailDialogProps {
 }
 
 export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailDialogProps) {
-  // Add a state to defer rendering of heavy content
-  const [isReady, setIsReady] = useState(false)
-
-  // Reset ready state when dialog opens/closes or item changes
-  useEffect(() => {
-    if (open) {
-      // Small delay to allow dialog animation to start smoothly
-      const timer = setTimeout(() => setIsReady(true), 150)
-      return () => clearTimeout(timer)
-    } else {
-      setIsReady(false)
-    }
-  }, [open, item])
-
   const parsedResult = useMemo(() => {
     if (!item?.result) return null
     try {
@@ -55,7 +41,7 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
       console.error('Failed to parse result JSON:', e)
       return null
     }
-  }, [item?.result])
+  }, [item])
 
   if (!item) return null
 
@@ -89,16 +75,12 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
           </div>
         </div>
 
-        {!isReady ? (
-          <div className="flex-1 flex items-center justify-center">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <Tabs defaultValue="er" className="flex-1 flex flex-col min-h-0">
-            <TabsList className="grid w-full grid-cols-3">
+        <Tabs defaultValue="er" className="flex-1 flex flex-col min-h-0">
+            <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="requirement">需求</TabsTrigger>
               <TabsTrigger value="er">ER 图</TabsTrigger>
               <TabsTrigger value="sql">SQL</TabsTrigger>
+              <TabsTrigger value="doc">设计文档</TabsTrigger>
             </TabsList>
 
             <div className="flex-1 overflow-hidden mt-4">
@@ -131,9 +113,20 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
                   </pre>
                 </ScrollArea>
               </TabsContent>
+
+              <TabsContent value="doc" className="h-full m-0">
+                <ScrollArea className="h-full w-full rounded-md border p-4">
+                  {parsedResult?.designDocument ? (
+                    <DesignDocMarkdown content={parsedResult.designDocument} />
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-muted-foreground">
+                      无设计文档
+                    </div>
+                  )}
+                </ScrollArea>
+              </TabsContent>
             </div>
           </Tabs>
-        )}
       </DialogContent>
     </Dialog>
   )

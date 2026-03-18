@@ -7,13 +7,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2, AlertCircle } from 'lucide-react'
+import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2, AlertCircle, FileText } from 'lucide-react'
 import { toast } from 'sonner'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import ERDiagram from '@/components/er-diagram'
 import SettingsDialog from '@/components/settings-dialog'
 import { ErrorDialog } from '@/components/error-dialog'
+import DesignDocMarkdown from '@/components/design-doc-markdown'
 
 interface TableField {
   name: string
@@ -44,6 +45,7 @@ interface AnalysisResult {
   relations: TableRelation[]
   sqlStatements: string
   databaseType?: string
+  designDocument?: string
 }
 
 const DATABASE_LABELS: Record<string, string> = {
@@ -61,8 +63,10 @@ const LOADING_MESSAGES = [
   "正在构建数据库模型...",
   "设计表结构与关系...",
   "生成 SQL 建表语句...",
+  "生成产品功能设计文档...",
   "正在优化字段类型...",
   "绘制 ER 关系图...",
+  "写入历史记录...",
   "即将完成..."
 ]
 
@@ -72,6 +76,7 @@ export default function Home() {
   const [loadingMessage, setLoadingMessage] = useState(LOADING_MESSAGES[0])
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [copiedSql, setCopiedSql] = useState(false)
+  const [copiedDoc, setCopiedDoc] = useState(false)
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
   const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
 
@@ -152,6 +157,15 @@ export default function Home() {
       setTimeout(() => setCopiedSql(false), 2000)
     }
   }, [result?.sqlStatements])
+
+  const copyDoc = useCallback(async () => {
+    if (result?.designDocument) {
+      await navigator.clipboard.writeText(result.designDocument)
+      setCopiedDoc(true)
+      toast.success('设计文档已复制到剪贴板')
+      setTimeout(() => setCopiedDoc(false), 2000)
+    }
+  }, [result?.designDocument])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -267,7 +281,7 @@ export default function Home() {
                 </div>
               ) : (
                 <Tabs defaultValue="keypoints" className="w-full">
-                  <TabsList className="grid w-full grid-cols-3 mb-4">
+                  <TabsList className="grid w-full grid-cols-4 mb-4">
                     <TabsTrigger value="keypoints" className="flex items-center gap-1.5">
                       <Lightbulb className="w-4 h-4" />
                       分析要点
@@ -279,6 +293,10 @@ export default function Home() {
                     <TabsTrigger value="er" className="flex items-center gap-1.5">
                       <GitBranch className="w-4 h-4" />
                       ER 图
+                    </TabsTrigger>
+                    <TabsTrigger value="doc" className="flex items-center gap-1.5">
+                      <FileText className="w-4 h-4" />
+                      设计文档
                     </TabsTrigger>
                   </TabsList>
 
@@ -370,6 +388,33 @@ export default function Home() {
                       <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800">
                         N:M = 多对多
                       </Badge>
+                    </div>
+                  </TabsContent>
+
+                  {/* Design Document Tab */}
+                  <TabsContent value="doc" className="mt-0">
+                    <div className="relative">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={copyDoc}
+                        className="absolute right-2 top-2 z-10 bg-slate-800/80 hover:bg-slate-700 text-white"
+                      >
+                        {copiedDoc ? (
+                          <Check className="w-4 h-4 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </Button>
+                      <div className="max-h-[400px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6">
+                        {result?.designDocument ? (
+                          <DesignDocMarkdown content={result.designDocument} />
+                        ) : (
+                          <div className="text-center text-slate-500 py-8">
+                            暂无设计文档
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </TabsContent>
                 </Tabs>

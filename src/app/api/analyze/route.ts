@@ -87,6 +87,7 @@ function getSystemPrompt(databaseType: string): string {
 2. 设计合理的数据库表结构
 3. 定义表之间的关系
 4. 生成符合 ${databaseType.toUpperCase()} 语法的建表语句
+5. 生成一份标准的数据库设计文档（Markdown格式），包含概述、数据字典和表关系说明
 
 请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式（如 \`\`\`json ... \`\`\`），不要包含任何额外的解释文字，直接返回纯 JSON 字符串**：
 
@@ -117,7 +118,8 @@ function getSystemPrompt(databaseType: string): string {
       "relationType": "1:N 或 1:1 或 N:M"
     }
   ],
-  "sqlStatements": "完整的SQL建表语句"
+  "sqlStatements": "完整的SQL建表语句",
+  "designDocument": "完整的数据库设计文档（Markdown格式，使用 # 等标题层级，**对于数据字典和表关系请使用标准的 Markdown 表格形式展示**）"
 }
 
 数据库特定语法要求 (${databaseType.toUpperCase()})：
@@ -336,6 +338,9 @@ export async function POST(request: NextRequest) {
     }
     if (!result.sqlStatements) {
       result.sqlStatements = ''
+    }
+    if (!result.designDocument) {
+      result.designDocument = ''
     }
 
     // 添加数据库类型信息到结果中

@@ -155,3 +155,63 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer utilities {
+  .prose {
+    @apply text-slate-700 dark:text-slate-300;
+  }
+  .prose h1 {
+    @apply text-2xl font-bold mt-6 mb-4 text-slate-900 dark:text-slate-100;
+  }
+  .prose h2 {
+    @apply text-xl font-semibold mt-5 mb-3 text-slate-900 dark:text-slate-100;
+  }
+  .prose h3 {
+    @apply text-lg font-medium mt-4 mb-2 text-slate-900 dark:text-slate-100;
+  }
+  .prose p {
+    @apply my-3 leading-relaxed;
+  }
+  .prose ul {
+    @apply list-disc list-inside my-3 pl-4;
+  }
+  .prose ol {
+    @apply list-decimal list-inside my-3 pl-4;
+  }
+  .prose li {
+    @apply my-1;
+  }
+  .prose strong {
+    @apply font-semibold text-slate-900 dark:text-slate-100;
+  }
+  .prose code {
+    @apply bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-sm font-mono text-emerald-600 dark:text-emerald-400;
+  }
+  .prose pre {
+    @apply bg-slate-950 text-slate-50 p-4 rounded-lg overflow-x-auto my-4 text-sm font-mono;
+  }
+  .prose pre code {
+    @apply bg-transparent p-0 text-inherit;
+  }
+  .prose blockquote {
+    @apply border-l-4 border-slate-300 dark:border-slate-700 pl-4 italic text-slate-500 dark:text-slate-400 my-4;
+  }
+  .prose table {
+    @apply w-full text-left border-collapse my-6 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden block sm:table;
+  }
+  .prose thead {
+    @apply bg-slate-50 dark:bg-slate-800/80;
+  }
+  .prose th {
+    @apply border-b-2 border-slate-200 dark:border-slate-700 py-3 px-4 font-semibold text-slate-900 dark:text-slate-100 whitespace-nowrap;
+  }
+  .prose td {
+    @apply border-b border-slate-200 dark:border-slate-800 py-3 px-4 align-top;
+  }
+  .prose tr:last-child td {
+    @apply border-b-0;
+  }
+  .prose tr {
+    @apply hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-colors;
+  }
+}
