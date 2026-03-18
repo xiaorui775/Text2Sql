@@ -48,3 +48,4 @@ server.log
 /skills/
 /prisma/dev.db
 package-lock.json
+pnpm-lock.yaml
