@@ -77,22 +77,42 @@ COMMENT ON TABLE USERS IS '用户表';
 `
 }
 
-function getSystemPrompt(databaseType: string): string {
-  const dbSyntax = DATABASE_SYNTAX[databaseType] || DATABASE_SYNTAX['mysql']
-  
-  return `你是一个资深的数据库架构师，擅长根据产品需求设计数据库表结构。
+// Stage 1: Requirement Optimization
+function getRequirementOptimizationPrompt(): string {
+  return `你是一个资深的产品经理兼业务架构师。
+用户输入的产品需求往往是口语化、简短或缺乏细节的。你的任务是接收用户的原始需求，结合行业经验，对其进行**脑补、细化和专业化翻译**。
+你需要补充潜在的业务逻辑、隐式需求（例如：必要的审计字段、权限控制、状态流转、软删除等），输出一段详细、结构化的标准业务需求描述，以便后续的数据库架构师能根据你的描述设计出健壮的表结构。
 
-当用户输入产品需求描述时，你需要：
-1. 分析需求，提取核心功能关键点
-2. 设计合理的数据库表结构
-3. 定义表之间的关系
-4. 生成符合 ${databaseType.toUpperCase()} 语法的建表语句
-5. 生成一份标准的数据库设计文档（Markdown格式），包含概述、数据字典和表关系说明
+【极度重要】：
+请直接返回详细的业务需求描述，不要任何解释性文字！不要返回 JSON 格式！`
+}
 
-请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式（如 \`\`\`json ... \`\`\`），不要包含任何额外的解释文字，直接返回纯 JSON 字符串**：
+// Stage 2: Requirement Analysis
+function getAnalysisPrompt(): string {
+  return `你是一个资深的业务分析师。
+请分析用户的产品需求描述，提取出核心功能关键点。
 
+【极度重要】：
+你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字！
+
+请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式，直接返回纯 JSON 字符串**：
 {
-  "keyPoints": ["关键点1", "关键点2", ...],
+  "keyPoints": ["关键点1", "关键点2", ...]
+}`
+}
+
+// Stage 3: Schema Design
+function getSchemaDesignPrompt(databaseType: string, keyPoints: string[]): string {
+  return `你是一个资深的数据库架构师。
+基于以下业务关键点，设计合理的数据库表结构和关系。
+业务关键点：
+${keyPoints.map(p => `- ${p}`).join('\n')}
+
+【极度重要】：
+你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字或直接输出 SQL！
+
+请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式，直接返回纯 JSON 字符串**：
+{
   "tables": [
     {
       "name": "表名",
@@ -117,13 +137,8 @@ function getSystemPrompt(databaseType: string): string {
       "toField": "目标字段名",
       "relationType": "1:N 或 1:1 或 N:M"
     }
-  ],
-  "sqlStatements": "完整的SQL建表语句",
-  "designDocument": "完整的数据库设计文档（Markdown格式，使用 # 等标题层级，**对于数据字典和表关系请使用标准的 Markdown 表格形式展示**）"
+  ]
 }
-
-数据库特定语法要求 (${databaseType.toUpperCase()})：
-${dbSyntax}
 
 通用设计原则：
 - 每个表必须有主键
@@ -132,8 +147,38 @@ ${dbSyntax}
 - 添加必要的审计字段如 created_at、updated_at
 - 关系类型包括：1:1（一对一）、1:N（一对多）、N:M（多对多）
 - 对于多对多关系，需要创建中间关联表
+- 字段类型请使用通用的描述（如 String, Integer, DateTime），后续会转换为特定数据库语法`
+}
 
-请确保返回的是有效的JSON格式，不要包含markdown代码块标记。`
+// Stage 4: SQL Generation
+function getSqlGenerationPrompt(databaseType: string, tables: any[], relations: any[]): string {
+  const dbSyntax = DATABASE_SYNTAX[databaseType] || DATABASE_SYNTAX['mysql']
+  
+  return `你是一个资深的数据库开发工程师。
+请根据以下表结构设计，生成符合 ${databaseType.toUpperCase()} 语法的建表语句。
+
+表结构设计：
+${JSON.stringify({ tables, relations }, null, 2)}
+
+【极度重要】：
+请直接返回完整的 SQL 建表语句，不要任何解释性文字！不要返回 JSON 格式！
+
+数据库特定语法要求 (${databaseType.toUpperCase()})：
+${dbSyntax}
+`
+}
+
+// Stage 5: Documentation Generation
+function getDocumentGenerationPrompt(tables: any[], relations: any[]): string {
+  return `你是一个资深的技术文档工程师。
+请根据以下表结构设计，编写一份标准的数据库设计文档。
+
+表结构设计：
+${JSON.stringify({ tables, relations }, null, 2)}
+
+【极度重要】：
+请直接返回完整的数据库设计文档（Markdown格式，使用 # 等标题层级，对于数据字典和表关系请使用标准的 Markdown 表格形式展示），不要任何解释性文字！不要返回 JSON 格式！
+`
 }
 
 interface LLMConfig {
@@ -146,14 +191,18 @@ interface LLMConfig {
   databaseType: string
 }
 
-async function callLLM(config: LLMConfig, userMessage: string): Promise<string> {
+async function callLLM(
+  config: LLMConfig, 
+  systemPrompt: string, 
+  userMessage: string, 
+  expectJson: boolean = true, 
+  textKey?: string
+): Promise<any> {
   const baseUrl = config.baseUrl || 'https://api.openai.com/v1'
   const url = `${baseUrl}/chat/completions`
 
-  const systemPrompt = getSystemPrompt(config.databaseType)
-
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 300000) // 300s timeout
+  const timeoutId = setTimeout(() => controller.abort(), 120000) // 120s timeout per stage
 
   try {
     const response = await fetch(url, {
@@ -181,41 +230,76 @@ async function callLLM(config: LLMConfig, userMessage: string): Promise<string> 
       throw new Error(`LLM API 调用失败: ${response.status} - ${errorText}`)
     }
 
+    const text = await response.text()
     let data
     try {
-      const text = await response.text()
-      try {
-        data = JSON.parse(text)
-      } catch (e) {
+      data = JSON.parse(text)
+    } catch (e) {
+        // Fallback parsing logic
         console.error('LLM API returned non-JSON response:', text)
-        // 如果返回的是 HTML，尝试提取错误信息
-        if (text.includes('<!DOCTYPE html>') || text.includes('<html>')) {
-          const titleMatch = text.match(/<title>(.*?)<\/title>/)
-          const title = titleMatch ? titleMatch[1] : 'Unknown HTML Error'
-          throw new Error(`LLM API 返回了 HTML 错误页面: ${title}`)
-        }
-        throw new Error(`LLM API 返回了非 JSON 格式的数据: ${text.slice(0, 100)}...`)
-      }
-    } catch (error) {
-      throw error
+        throw new Error(`LLM API returned invalid JSON: ${text.slice(0, 100)}...`)
     }
 
     const content = data.choices?.[0]?.message?.content
     if (!content) {
-       throw new Error('LLM API 返回的数据格式不正确，缺少 choices[0].message.content')
+       throw new Error('LLM API returned empty content')
     }
 
-    return content
+    if (!expectJson && textKey) {
+        let cleanedContent = content.trim()
+        // 去除可能存在的 markdown 代码块包裹
+        cleanedContent = cleanedContent.replace(/^```[\w]*\n?/i, '')
+                                       .replace(/\n?```$/i, '')
+                                       .trim()
+        return { [textKey]: cleanedContent }
+    }
+
+    // Robust JSON extraction
+    let cleanedContent = content.trim()
+    const jsonBlockMatch = cleanedContent.match(/```json\s*([\s\S]*?)\s*```/)
+    if (jsonBlockMatch) {
+      cleanedContent = jsonBlockMatch[1]
+    } else {
+      const codeBlockMatch = cleanedContent.match(/```\s*([\s\S]*?)\s*```/)
+      if (codeBlockMatch) {
+        cleanedContent = codeBlockMatch[1]
+      }
+    }
+    
+    const firstBrace = cleanedContent.indexOf('{')
+    const lastBrace = cleanedContent.lastIndexOf('}')
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleanedContent = cleanedContent.substring(firstBrace, lastBrace + 1)
+    }
+
+    try {
+      return JSON.parse(cleanedContent)
+    } catch (e) {
+      // 容错处理：如果模型没有返回 JSON 而是直接返回了 SQL 代码（通常包含 CREATE TABLE 或 CREATE DATABASE）
+      if (!cleanedContent.includes('{') && (cleanedContent.toUpperCase().includes('CREATE TABLE') || cleanedContent.toUpperCase().includes('CREATE DATABASE'))) {
+        return {
+          sqlStatements: content.replace(/```sql/gi, '').replace(/```/g, '').replace(/^sql\n/i, '').trim()
+        }
+      }
+      // 容错处理：如果是文档生成阶段返回了纯 Markdown
+      if (!cleanedContent.includes('{') && cleanedContent.includes('#')) {
+         return {
+            designDocument: content.replace(/```markdown/gi, '').replace(/```/g, '').trim()
+         }
+      }
+      console.error('Failed to parse extracted JSON:', cleanedContent)
+      throw new Error('Failed to parse LLM response as JSON')
+    }
+
   } catch (error) {
     clearTimeout(timeoutId)
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error('LLM API 调用超时 (300s)，请尝试简化需求或稍后重试')
-    }
     throw error
   }
 }
 
 export async function POST(request: NextRequest) {
+  let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
+
   try {
     const body = await request.json()
     const { requirement } = body
@@ -239,152 +323,152 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // 检查是否有缓存的成功记录 (最近 24 小时内的相同需求)
+    // Check cache
     const cachedHistory = await db.history.findFirst({
       where: {
         question: requirement,
         status: 'success',
         databaseType: llmConfig.databaseType || 'mysql',
         createdAt: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000) // 24 hours ago
+          gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
         }
       },
-      orderBy: {
-        createdAt: 'desc'
-      }
+      orderBy: { createdAt: 'desc' }
     })
 
     if (cachedHistory) {
-      try {
+        // If cached, return immediately (not streaming for simplicity, or simulate stream)
+        // To be consistent with frontend, we should probably return JSON directly or stream it.
+        // Let's stream the cached result to keep frontend logic unified.
         const cachedResult = JSON.parse(cachedHistory.result)
-        // 更新历史记录时间，使其出现在顶部
-        await db.history.update({
-          where: { id: cachedHistory.id },
-          data: { createdAt: new Date() }
+        
+        const stream = new TransformStream()
+        const writer = stream.writable.getWriter()
+        const encoder = new TextEncoder()
+
+        // Async IIFE to write to stream
+        ;(async () => {
+            await writer.write(encoder.encode(`event: final_result\ndata: ${JSON.stringify(cachedResult)}\n\n`))
+            await writer.close()
+        })()
+
+        return new NextResponse(stream.readable, {
+            headers: {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            }
         })
-        return NextResponse.json(cachedResult)
-      } catch (e) {
-        console.error('Failed to parse cached result:', e)
-        // 如果解析失败，继续执行 LLM 调用
-      }
     }
 
-    // 调用 LLM
-    const responseContent = await callLLM(
-      {
-        provider: llmConfig.provider,
-        apiKey: llmConfig.apiKey,
-        baseUrl: llmConfig.baseUrl,
-        model: llmConfig.model,
-        temperature: llmConfig.temperature,
-        maxTokens: llmConfig.maxTokens,
-        databaseType: llmConfig.databaseType || 'mysql'
-      },
-      `请分析以下产品需求，设计数据库表结构：\n\n${requirement}`
-    )
+    const stream = new TransformStream()
+    writer = stream.writable.getWriter()
+    const encoder = new TextEncoder()
 
-    if (!responseContent) {
-      return NextResponse.json(
-        { error: 'AI 分析返回为空' },
-        { status: 500 }
-      )
+    const sendEvent = async (event: string, data: any) => {
+        await writer!.write(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
     }
 
-    // 解析 JSON 响应
-    let result
-    try {
-      // 更加健壮的 JSON 提取逻辑
-      let cleanedContent = responseContent.trim()
-      
-      // 1. 尝试匹配 ```json ... ``` 代码块
-      const jsonBlockMatch = cleanedContent.match(/```json\s*([\s\S]*?)\s*```/)
-      if (jsonBlockMatch) {
-        cleanedContent = jsonBlockMatch[1]
-      } else {
-        // 2. 尝试匹配 ``` ... ``` 代码块
-        const codeBlockMatch = cleanedContent.match(/```\s*([\s\S]*?)\s*```/)
-        if (codeBlockMatch) {
-          cleanedContent = codeBlockMatch[1]
+    // Start processing in background
+    ;(async () => {
+        try {
+            const config = {
+                provider: llmConfig.provider,
+                apiKey: llmConfig.apiKey,
+                baseUrl: llmConfig.baseUrl,
+                model: llmConfig.model,
+                temperature: llmConfig.temperature,
+                maxTokens: llmConfig.maxTokens,
+                databaseType: llmConfig.databaseType || 'mysql'
+            }
+
+            // Stage 1: Requirement Optimization
+            await sendEvent('stage_start', { stage: 'optimization', message: '正在进行需求扩展与优化...' })
+            const optimizationResult = await callLLM(config, getRequirementOptimizationPrompt(), requirement, false, 'optimizedRequirement')
+            if (!optimizationResult || typeof optimizationResult.optimizedRequirement !== 'string') {
+                throw new Error('需求优化阶段返回数据格式错误')
+            }
+            await sendEvent('stage_done', { stage: 'optimization', data: optimizationResult })
+
+            const optimizedRequirement = optimizationResult.optimizedRequirement;
+
+            // Stage 2: Requirement Analysis
+            await sendEvent('stage_start', { stage: 'analysis', message: '正在提取核心关键点...' })
+            const analysisResult = await callLLM(config, getAnalysisPrompt(), optimizedRequirement, true)
+            if (!analysisResult || !Array.isArray(analysisResult.keyPoints)) {
+                throw new Error('需求分析阶段返回数据格式错误')
+            }
+            await sendEvent('stage_done', { stage: 'analysis', data: analysisResult })
+
+            // Stage 3: Schema Design
+            await sendEvent('stage_start', { stage: 'design', message: '正在设计表结构...' })
+            const schemaResult = await callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true)
+             if (!schemaResult || !Array.isArray(schemaResult.tables) || !Array.isArray(schemaResult.relations)) {
+                throw new Error('表结构设计阶段返回数据格式错误')
+            }
+            await sendEvent('stage_done', { stage: 'design', data: schemaResult })
+
+            // Stage 4: SQL Generation
+            await sendEvent('stage_start', { stage: 'sql_generation', message: '正在生成 SQL 语句...' })
+            const sqlGenerationResult = await callLLM(config, getSqlGenerationPrompt(config.databaseType, schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'sqlStatements')
+            if (!sqlGenerationResult || typeof sqlGenerationResult.sqlStatements !== 'string') {
+                 throw new Error('SQL生成阶段返回数据格式错误')
+            }
+            await sendEvent('stage_done', { stage: 'sql_generation', data: sqlGenerationResult })
+
+            // Stage 5: Documentation Generation
+            await sendEvent('stage_start', { stage: 'doc_generation', message: '正在生成设计文档...' })
+            const docGenerationResult = await callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'designDocument')
+            if (!docGenerationResult || typeof docGenerationResult.designDocument !== 'string') {
+                 throw new Error('文档生成阶段返回数据格式错误')
+            }
+            await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
+
+            // Combine results
+            const finalResult = {
+                optimizedRequirement: optimizationResult.optimizedRequirement,
+                keyPoints: analysisResult.keyPoints,
+                tables: schemaResult.tables,
+                relations: schemaResult.relations,
+                sqlStatements: sqlGenerationResult.sqlStatements,
+                designDocument: docGenerationResult.designDocument,
+                databaseType: config.databaseType
+            }
+
+            // Save history
+            await db.history.create({
+                data: {
+                    question: requirement,
+                    result: JSON.stringify(finalResult),
+                    databaseType: config.databaseType,
+                    provider: config.provider,
+                    model: config.model,
+                    status: 'success'
+                }
+            })
+
+            await sendEvent('final_result', finalResult)
+        } catch (error) {
+            console.error('Streaming error:', error)
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+            await sendEvent('error', { message: errorMessage })
+        } finally {
+            await writer!.close()
         }
-      }
+    })()
 
-      // 3. 如果还是无法解析，尝试提取最外层的 {}
-      // 这一步是为了应对开头或结尾有额外文字的情况
-      const firstBrace = cleanedContent.indexOf('{')
-      const lastBrace = cleanedContent.lastIndexOf('}')
-      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-        cleanedContent = cleanedContent.substring(firstBrace, lastBrace + 1)
-      }
-
-      result = JSON.parse(cleanedContent)
-    } catch (parseError) {
-      console.error('Failed to parse JSON:', parseError)
-      console.error('Response content:', responseContent)
-      return NextResponse.json(
-        { error: 'AI 返回格式解析失败，请重试' },
-        { status: 500 }
-      )
-    }
-
-    // 验证结果结构
-    if (!result.keyPoints || !Array.isArray(result.keyPoints)) {
-      result.keyPoints = []
-    }
-    if (!result.tables || !Array.isArray(result.tables)) {
-      result.tables = []
-    }
-    if (!result.relations || !Array.isArray(result.relations)) {
-      result.relations = []
-    }
-    if (!result.sqlStatements) {
-      result.sqlStatements = ''
-    }
-    if (!result.designDocument) {
-      result.designDocument = ''
-    }
-
-    // 添加数据库类型信息到结果中
-    result.databaseType = llmConfig.databaseType || 'mysql'
-
-    // 保存问答历史
-    try {
-      await db.history.create({
-        data: {
-          question: requirement,
-          result: JSON.stringify(result),
-          databaseType: llmConfig.databaseType || 'mysql',
-          provider: llmConfig.provider,
-          model: llmConfig.model,
-          status: 'success'
+    return new NextResponse(stream.readable, {
+        headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
         }
-      })
-    } catch (historyError) {
-      console.error('Failed to save history:', historyError)
-      // 不阻塞主流程
-    }
-
-    return NextResponse.json(result)
+    })
 
   } catch (error) {
-    console.error('Analysis error:', error)
-    const errorMessage = error instanceof Error ? error.message : '分析过程中出现错误，请稍后重试'
-    
-    // 尝试保存失败记录（如果能获取到 LLM 配置）
-    try {
-      const body = await request.clone().json().catch(() => ({}))
-      const { requirement } = body
-      if (requirement) {
-         // 获取 LLM 配置 (再次尝试获取，因为外层的 llmConfig 作用域可能不在这里，或者为了简单直接重新查询)
-         // 为了避免复杂性，这里简单处理，如果上面没获取到配置，这里可能也获取不到，或者我们可以把 llmConfig 提到 try 外面
-         // 但为了代码最小改动，我们这里只在有 requirement 时尝试记录
-         // 实际生产环境应该优化这里的逻辑
-      }
-    } catch (e) {
-      // 忽略
-    }
-
+    console.error('Request error:', error)
     return NextResponse.json(
-      { error: errorMessage },
+      { error: error instanceof Error ? error.message : 'Internal Server Error' },
       { status: 500 }
     )
   }

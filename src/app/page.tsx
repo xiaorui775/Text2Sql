@@ -1,13 +1,13 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2, AlertCircle, FileText } from 'lucide-react'
+import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2, AlertCircle, FileText, CheckCircle2, CircleDashed } from 'lucide-react'
 import { toast } from 'sonner'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -40,6 +40,7 @@ interface TableSchema {
 }
 
 interface AnalysisResult {
+  optimizedRequirement?: string
   keyPoints: string[]
   tables: TableSchema[]
   relations: TableRelation[]
@@ -58,27 +59,23 @@ const DATABASE_LABELS: Record<string, string> = {
   clickhouse: 'ClickHouse'
 }
 
-const LOADING_MESSAGES = [
-  "正在分析业务需求...",
-  "正在构建数据库模型...",
-  "设计表结构与关系...",
-  "生成 SQL 建表语句...",
-  "生成产品功能设计文档...",
-  "正在优化字段类型...",
-  "绘制 ER 关系图...",
-  "写入历史记录...",
-  "即将完成..."
+const STAGES = [
+  { id: 'optimization', label: '需求优化' },
+  { id: 'analysis', label: '提取关键点' },
+  { id: 'design', label: '表结构设计' },
+  { id: 'sql_generation', label: '生成 SQL' },
+  { id: 'doc_generation', label: '生成文档' }
 ]
 
 export default function Home() {
   const [requirement, setRequirement] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [loadingMessage, setLoadingMessage] = useState(LOADING_MESSAGES[0])
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [copiedSql, setCopiedSql] = useState(false)
   const [copiedDoc, setCopiedDoc] = useState(false)
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
   const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
+  const [currentStage, setCurrentStage] = useState<string>('')
 
   // 检查配置状态
   const checkConfig = useCallback(async () => {
@@ -96,19 +93,6 @@ export default function Home() {
     checkConfig()
   }, [checkConfig])
 
-  useEffect(() => {
-    let interval: NodeJS.Timeout
-    if (isLoading) {
-      let index = 0
-      setLoadingMessage(LOADING_MESSAGES[0])
-      interval = setInterval(() => {
-        index = (index + 1) % LOADING_MESSAGES.length
-        setLoadingMessage(LOADING_MESSAGES[index])
-      }, 3000)
-    }
-    return () => clearInterval(interval)
-  }, [isLoading])
-
   const analyzeRequirement = useCallback(async () => {
     if (!requirement.trim()) {
       toast.error('请输入产品需求描述')
@@ -117,6 +101,19 @@ export default function Home() {
 
     setIsLoading(true)
     setResult(null)
+    setCurrentStage('')
+    
+    // Initialize empty result for progressive rendering
+    const emptyResult: AnalysisResult = {
+        optimizedRequirement: '',
+        keyPoints: [],
+        tables: [],
+        relations: [],
+        sqlStatements: '',
+        databaseType: '',
+        designDocument: ''
+    }
+    setResult(emptyResult)
 
     try {
       const response = await fetch('/api/analyze', {
@@ -127,24 +124,86 @@ export default function Home() {
         body: JSON.stringify({ requirement }),
       })
 
-      const data = await response.json()
-
       if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
         if (data.needConfig) {
           setHasConfig(false)
           toast.error('请先配置 LLM 服务')
+          setIsLoading(false)
           return
         }
         throw new Error(data.error || '分析失败')
       }
 
-      setResult(data)
-      toast.success('分析完成')
+      if (!response.body) {
+        throw new Error('ReadableStream not supported in this browser.')
+      }
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+        buffer += chunk
+        
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || '' // Keep the incomplete line in buffer
+
+        for (const line of lines) {
+            if (line.startsWith('event: ')) {
+                const eventMatch = line.match(/^event: (.*)$/m)
+                const dataMatch = line.match(/^data: (.*)$/m)
+                
+                if (eventMatch && dataMatch) {
+                    const event = eventMatch[1]
+                    const dataStr = dataMatch[1]
+                    
+                    try {
+                        const data = JSON.parse(dataStr)
+                        
+                        if (event === 'stage_start') {
+                            setCurrentStage(data.stage)
+                        } else if (event === 'stage_done') {
+                            if (data.stage === 'optimization') {
+                                setResult(prev => prev ? ({ ...prev, optimizedRequirement: data.data.optimizedRequirement }) : prev)
+                            } else if (data.stage === 'analysis') {
+                                setResult(prev => prev ? ({ ...prev, keyPoints: data.data.keyPoints }) : prev)
+                            } else if (data.stage === 'design') {
+                                setResult(prev => prev ? ({ ...prev, tables: data.data.tables, relations: data.data.relations }) : prev)
+                            } else if (data.stage === 'sql_generation') {
+                                setResult(prev => prev ? ({ 
+                                    ...prev, 
+                                    sqlStatements: data.data.sqlStatements
+                                }) : prev)
+                            } else if (data.stage === 'doc_generation') {
+                                setResult(prev => prev ? ({ 
+                                    ...prev, 
+                                    designDocument: data.data.designDocument 
+                                }) : prev)
+                            }
+                        } else if (event === 'final_result') {
+                            setResult(data)
+                            toast.success('分析完成')
+                            setIsLoading(false)
+                        } else if (event === 'error') {
+                            throw new Error(data.message)
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse SSE data:', e)
+                    }
+                }
+            }
+        }
+      }
+
     } catch (error) {
       console.error('Error:', error)
       const message = error instanceof Error ? error.message : '分析过程中出现错误，请重试'
       setErrorDialog({ open: true, message })
-    } finally {
       setIsLoading(false)
     }
   }, [requirement])
@@ -175,6 +234,53 @@ export default function Home() {
 
   const handleConfigChange = () => {
     checkConfig()
+  }
+
+  // 渲染进度步骤条
+  const renderProgressSteps = () => {
+    if (!isLoading) return null;
+    
+    const currentIndex = STAGES.findIndex(s => s.id === currentStage);
+    
+    return (
+      <div className="w-full mb-6 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800 shrink-0">
+        <div className="flex items-center justify-between">
+          {STAGES.map((stage, index) => {
+            const isCompleted = index < currentIndex || (currentIndex === -1 && currentStage !== '');
+            const isCurrent = index === currentIndex;
+            const isPending = index > currentIndex && currentStage !== '';
+            
+            return (
+              <div key={stage.id} className="flex flex-col items-center relative z-10 flex-1">
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 mb-2 bg-white dark:bg-slate-900 transition-colors duration-300
+                  ${isCompleted ? 'border-emerald-500 text-emerald-500' : ''}
+                  ${isCurrent ? 'border-blue-500 text-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)]' : ''}
+                  ${isPending || currentStage === '' ? 'border-slate-200 dark:border-slate-700 text-slate-400' : ''}
+                `}>
+                  {isCompleted ? (
+                    <CheckCircle2 className="w-5 h-5" />
+                  ) : isCurrent ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <CircleDashed className="w-5 h-5" />
+                  )}
+                </div>
+                <span className={`text-xs font-medium ${isCurrent ? 'text-blue-600 dark:text-blue-400' : isCompleted ? 'text-emerald-600 dark:text-emerald-500' : 'text-slate-500 dark:text-slate-400'}`}>
+                  {stage.label}
+                </span>
+                
+                {/* 连接线 */}
+                {index < STAGES.length - 1 && (
+                  <div className={`absolute top-4 left-[50%] w-full h-[2px] -z-10
+                    ${index < currentIndex ? 'bg-emerald-400' : 'bg-slate-200 dark:bg-slate-700'}
+                  `} style={{ width: '100%', left: '50%' }} />
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -213,8 +319,8 @@ export default function Home() {
         {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left Panel - Input */}
-          <Card className="shadow-xl border-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm">
-            <CardHeader className="pb-4">
+          <Card className="shadow-xl border-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm flex flex-col min-h-[600px] lg:h-[calc(100vh-200px)]">
+            <CardHeader className="pb-4 shrink-0">
               <CardTitle className="flex items-center gap-2 text-xl">
                 <Lightbulb className="w-5 h-5 text-amber-500" />
                 需求描述
@@ -223,16 +329,16 @@ export default function Home() {
                 描述您的产品功能、数据实体及业务关系
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="space-y-4 flex flex-col flex-1 min-h-0 overflow-hidden">
               <Textarea
                 placeholder="例如：设计一个电商系统，包含用户、商品、订单、购物车模块。用户可以浏览商品并下单；订单需记录详情和物流状态；商品支持分类和库存管理..."
                 value={requirement}
                 onChange={(e) => setRequirement(e.target.value)}
                 onKeyDown={handleKeyDown}
-                className="min-h-[280px] resize-none text-base leading-relaxed border-slate-200 focus:border-emerald-500 focus:ring-emerald-500/20"
+                className="flex-1 resize-none text-base leading-relaxed border-slate-200 focus:border-emerald-500 focus:ring-emerald-500/20 min-h-0"
                 disabled={isLoading}
               />
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between shrink-0">
                 <span className="text-sm text-slate-500">
                   <kbd className="px-2 py-0.5 bg-slate-100 rounded text-xs font-mono">Ctrl + Enter</kbd> 快速生成
                 </span>
@@ -244,7 +350,7 @@ export default function Home() {
                   {isLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      {loadingMessage}
+                      正在生成...
                     </>
                   ) : (
                     <>
@@ -258,8 +364,8 @@ export default function Home() {
           </Card>
 
           {/* Right Panel - Results */}
-          <Card className="shadow-xl border-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm">
-            <CardHeader className="pb-2">
+          <Card className="shadow-xl border-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm flex flex-col min-h-[600px] lg:h-[calc(100vh-200px)]">
+            <CardHeader className="pb-2 shrink-0">
               <CardTitle className="flex items-center gap-2 text-xl">
                 <Table2 className="w-5 h-5 text-emerald-500" />
                 设计方案
@@ -273,37 +379,65 @@ export default function Home() {
                 {result ? 'AI 生成的数据库设计方案' : '设计方案将在此处显示'}
               </CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="flex-1 overflow-hidden flex flex-col min-h-0">
+              {renderProgressSteps()}
               {!result ? (
-                <div className="flex flex-col items-center justify-center py-16 text-slate-400">
+                <div className="flex flex-col items-center justify-center h-full text-slate-400">
                   <Database className="w-16 h-16 mb-4 opacity-30" />
                   <p className="text-center">输入需求后点击"生成设计"<br />即可获取完整方案</p>
                 </div>
               ) : (
-                <Tabs defaultValue="keypoints" className="w-full">
-                  <TabsList className="grid w-full grid-cols-4 mb-4">
-                    <TabsTrigger value="keypoints" className="flex items-center gap-1.5">
-                      <Lightbulb className="w-4 h-4" />
-                      分析要点
+                <Tabs defaultValue="optimization" className="w-full flex flex-col flex-1 min-h-0">
+                  <TabsList className="grid w-full grid-cols-5 mb-4 shrink-0">
+                    <TabsTrigger value="optimization" className="flex items-center gap-1.5">
+                      <Sparkles className="w-4 h-4" />
+                      需求详情
                     </TabsTrigger>
-                    <TabsTrigger value="sql" className="flex items-center gap-1.5">
+                    <TabsTrigger value="keypoints" className="flex items-center gap-1.5" disabled={result.keyPoints.length === 0}>
+                      <Lightbulb className="w-4 h-4" />
+                      提取关键点
+                    </TabsTrigger>
+                    <TabsTrigger value="sql" className="flex items-center gap-1.5" disabled={!result.sqlStatements}>
                       <Database className="w-4 h-4" />
                       SQL
                     </TabsTrigger>
-                    <TabsTrigger value="er" className="flex items-center gap-1.5">
+                    <TabsTrigger value="er" className="flex items-center gap-1.5" disabled={result.tables.length === 0}>
                       <GitBranch className="w-4 h-4" />
                       ER 图
                     </TabsTrigger>
-                    <TabsTrigger value="doc" className="flex items-center gap-1.5">
+                    <TabsTrigger value="doc" className="flex items-center gap-1.5" disabled={!result.designDocument}>
                       <FileText className="w-4 h-4" />
                       设计文档
                     </TabsTrigger>
                   </TabsList>
 
+                  {/* Optimization Tab */}
+                  <TabsContent value="optimization" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
+                    <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-6 border border-slate-100 dark:border-slate-800 flex-1 overflow-auto">
+                      {result.optimizedRequirement ? (
+                        <div className="prose prose-slate dark:prose-invert max-w-none">
+                          <div className="whitespace-pre-wrap text-slate-700 dark:text-slate-300 leading-relaxed">
+                            {result.optimizedRequirement}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center h-full text-slate-400">
+                          {isLoading ? (
+                            <div className="flex flex-col items-center gap-2">
+                                <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
+                                <span>正在进行需求扩展与优化...</span>
+                            </div>
+                          ) : "暂无优化数据"}
+                        </div>
+                      )}
+                    </div>
+                  </TabsContent>
+
                   {/* Key Points Tab */}
-                  <TabsContent value="keypoints" className="mt-0">
-                    <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2">
-                      {result.keyPoints.map((point, index) => (
+                  <TabsContent value="keypoints" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
+                    <div className="space-y-3 flex-1 overflow-auto pr-2">
+                      {result.keyPoints.length > 0 ? (
+                        result.keyPoints.map((point, index) => (
                         <div
                           key={index}
                           className="flex items-start gap-3 p-3 bg-gradient-to-r from-slate-50 to-transparent dark:from-slate-800/50 dark:to-transparent rounded-lg border border-slate-100 dark:border-slate-800"
@@ -313,13 +447,22 @@ export default function Home() {
                           </div>
                           <p className="text-slate-700 dark:text-slate-300 leading-relaxed">{point}</p>
                         </div>
-                      ))}
+                      ))) : (
+                        <div className="flex items-center justify-center h-full text-slate-400">
+                             {isLoading ? (
+                                <div className="flex flex-col items-center gap-2">
+                                    <Loader2 className="w-6 h-6 animate-spin text-emerald-500" />
+                                    <span>正在分析业务关键点...</span>
+                                </div>
+                             ) : "暂无分析数据"}
+                        </div>
+                      )}
                     </div>
                   </TabsContent>
 
                   {/* SQL Tab */}
-                  <TabsContent value="sql" className="mt-0">
-                    <div className="relative">
+                  <TabsContent value="sql" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
+                    <div className="relative flex-1 flex flex-col min-h-0">
                       {/* Database Type Badge */}
                       {result.databaseType && (
                         <div className="absolute right-2 top-2 z-20 flex items-center gap-2">
@@ -340,7 +483,7 @@ export default function Home() {
                           </Button>
                         </div>
                       )}
-                      {!result.databaseType && (
+                      {!result.databaseType && result.sqlStatements && (
                         <Button
                           variant="ghost"
                           size="sm"
@@ -354,28 +497,43 @@ export default function Home() {
                           )}
                         </Button>
                       )}
-                      <div className="max-h-[400px] overflow-auto rounded-lg">
-                        <SyntaxHighlighter
-                          language="sql"
-                          style={vscDarkPlus}
-                          customStyle={{
-                            margin: 0,
-                            borderRadius: '0.5rem',
-                            fontSize: '0.875rem',
-                          }}
-                        >
-                          {result.sqlStatements}
-                        </SyntaxHighlighter>
+                      <div className="flex-1 overflow-auto rounded-lg min-h-0 bg-[#1e1e1e] flex flex-col">
+                         {result.sqlStatements ? (
+                            <SyntaxHighlighter
+                              language="sql"
+                              style={vscDarkPlus}
+                              customStyle={{
+                                margin: 0,
+                                borderRadius: '0.5rem',
+                                fontSize: '0.875rem',
+                                minHeight: '100%'
+                              }}
+                            >
+                              {result.sqlStatements}
+                            </SyntaxHighlighter>
+                         ) : (
+                            <div className="flex items-center justify-center flex-1 text-slate-400">
+                                {isLoading ? "等待 SQL 生成..." : "暂无 SQL"}
+                            </div>
+                         )}
                       </div>
                     </div>
                   </TabsContent>
 
                   {/* ER Diagram Tab */}
-                  <TabsContent value="er" className="mt-0">
-                    <div className="border border-slate-200 dark:border-slate-700 rounded-lg bg-slate-50 dark:bg-slate-800/50 overflow-hidden">
-                      <ERDiagram tables={result.tables} relations={result.relations} />
+                  <TabsContent value="er" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
+                    <div className="border border-slate-200 dark:border-slate-700 rounded-lg bg-slate-50 dark:bg-slate-800/50 flex-1 relative overflow-auto">
+                      {result.tables.length > 0 ? (
+                        <div className="min-w-full min-h-full">
+                          <ERDiagram tables={result.tables} relations={result.relations} />
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-center h-full text-slate-400 absolute inset-0">
+                            {isLoading ? "正在设计表结构..." : "暂无 ER 图数据"}
+                        </div>
+                      )}
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-3 flex flex-wrap gap-2 shrink-0">
                       <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800">
                         PK = 主键
                       </Badge>
@@ -392,26 +550,28 @@ export default function Home() {
                   </TabsContent>
 
                   {/* Design Document Tab */}
-                  <TabsContent value="doc" className="mt-0">
-                    <div className="relative">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={copyDoc}
-                        className="absolute right-2 top-2 z-10 bg-slate-800/80 hover:bg-slate-700 text-white"
-                      >
-                        {copiedDoc ? (
-                          <Check className="w-4 h-4 text-emerald-400" />
-                        ) : (
-                          <Copy className="w-4 h-4" />
-                        )}
-                      </Button>
-                      <div className="max-h-[400px] overflow-auto rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6">
+                  <TabsContent value="doc" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
+                    <div className="relative flex-1 flex flex-col min-h-0">
+                      {result.designDocument && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={copyDoc}
+                            className="absolute right-2 top-2 z-10 bg-slate-800/80 hover:bg-slate-700 text-white"
+                        >
+                            {copiedDoc ? (
+                            <Check className="w-4 h-4 text-emerald-400" />
+                            ) : (
+                            <Copy className="w-4 h-4" />
+                            )}
+                        </Button>
+                      )}
+                      <div className="flex-1 overflow-auto rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 p-6 min-h-0">
                         {result?.designDocument ? (
                           <DesignDocMarkdown content={result.designDocument} />
                         ) : (
-                          <div className="text-center text-slate-500 py-8">
-                            暂无设计文档
+                          <div className="text-center text-slate-500 h-full flex items-center justify-center">
+                            {isLoading ? "等待文档生成..." : "暂无设计文档"}
                           </div>
                         )}
                       </div>
