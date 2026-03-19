@@ -73,6 +73,22 @@ const LABEL_WIDTH = 44
 const LABEL_HEIGHT = 22
 const LABEL_SAFE_GAP = 8
 
+function estimateTextWidth(text: string, latinWidth: number): number {
+  let total = 0
+  for (const char of text) {
+    if (/\s/.test(char)) {
+      total += latinWidth * 0.5
+    } else if (/[\u4e00-\u9fff]/.test(char)) {
+      total += latinWidth * 1.9
+    } else if (/[()（）,.:;'"`~!@#$%^&*+=<>?/\\|[\]{}-]/.test(char)) {
+      total += latinWidth * 0.9
+    } else {
+      total += latinWidth
+    }
+  }
+  return total
+}
+
 function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   const positions: Record<string, TablePosition> = {}
   
@@ -82,12 +98,12 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   let maxTypeWidth = 0
   
   tables.forEach(table => {
-    maxNameWidth = Math.max(maxNameWidth, table.name.length * 8)
+    maxNameWidth = Math.max(maxNameWidth, estimateTextWidth(getDisplayName(table.name, table.comment), 8))
     
     table.fields.forEach(field => {
-      maxNameWidth = Math.max(maxNameWidth, field.name.length * 7)
+      maxNameWidth = Math.max(maxNameWidth, estimateTextWidth(getDisplayName(field.name, field.comment), 7))
       const typeStr = field.type
-      maxTypeWidth = Math.max(maxTypeWidth, typeStr.length * 6)
+      maxTypeWidth = Math.max(maxTypeWidth, estimateTextWidth(typeStr, 6))
     })
   })
   
@@ -136,6 +152,12 @@ function getRelationColor(relationType: string) {
 
 function getRelationLabel(relationType: string) {
   return relationType
+}
+
+function getDisplayName(name: string, comment?: string) {
+  const normalizedComment = (comment || '').trim()
+  if (!normalizedComment || normalizedComment === name) return name
+  return `${name}（${normalizedComment}）`
 }
 
 function getRelationEndpoints(
@@ -392,13 +414,13 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
                       <stop offset="100%" stopColor="#14b8a6" />
                     </linearGradient>
                   </defs>
-                  <text x="16" y="26" fontSize="14" fontWeight="600" fill="white">{table.name}</text>
+                  <text x="16" y="26" fontSize="14" fontWeight="600" fill="white">{getDisplayName(table.name, table.comment)}</text>
                   {table.fields.map((field, fieldIndex) => (
                     <g key={field.name}>
                       <rect y={40 + fieldIndex * 28} width={pos.width} height="28" fill={fieldIndex % 2 === 0 ? 'transparent' : 'rgba(241, 245, 249, 0.5)'} />
                       {field.isPrimary && <text x={12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#059669" fontFamily="monospace">PK</text>}
                       {field.isForeign && <text x={field.isPrimary ? 30 : 12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#3b82f6" fontFamily="monospace">FK</text>}
-                      <text x={48} y={40 + fieldIndex * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{field.name}</text>
+                      <text x={48} y={40 + fieldIndex * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{getDisplayName(field.name, field.comment)}</text>
                       <text x={pos.typeX} y={40 + fieldIndex * 28 + 20} fontSize="10" fill="#94a3b8" textAnchor="start">{field.type}</text>
                     </g>
                   ))}
