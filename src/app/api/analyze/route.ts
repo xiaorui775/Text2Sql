@@ -91,9 +91,11 @@ function getRequirementOptimizationPrompt(): string {
 function getAnalysisPrompt(): string {
   return `你是一个资深的业务分析师。
 请分析用户的产品需求描述，提取出核心功能关键点。
+关键点必须是可映射为数据库建模的内容，禁止输出 UI、样式、页面交互等无关信息。
 
 【极度重要】：
 你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字！
+不要输出 markdown，不要输出代码块，不要输出任何 JSON 之外的字符。
 
 请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式，直接返回纯 JSON 字符串**：
 {
@@ -110,6 +112,7 @@ ${keyPoints.map(p => `- ${p}`).join('\n')}
 
 【极度重要】：
 你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字或直接输出 SQL！
+不要输出 markdown，不要输出代码块，不要输出任何 JSON 之外的字符。
 
 请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式，直接返回纯 JSON 字符串**：
 {
@@ -191,18 +194,239 @@ interface LLMConfig {
   databaseType: string
 }
 
+type AnalyzeStage = 'optimization' | 'analysis' | 'design' | 'sql_generation' | 'doc_generation'
+
+interface CallLLMOptions {
+  timeoutMs: number
+  maxRetries: number
+  stageName: AnalyzeStage
+}
+
+const ANALYZE_TOTAL_BUDGET_MS = 270000
+const HEARTBEAT_INTERVAL_MS = 12000
+const STAGE_TIMEOUT_MS: Record<AnalyzeStage, number> = {
+  optimization: 50000,
+  analysis: 40000,
+  design: 70000,
+  sql_generation: 60000,
+  doc_generation: 50000
+}
+
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function getRemainingBudgetMs(startTime: number): number {
+  return ANALYZE_TOTAL_BUDGET_MS - (Date.now() - startTime)
+}
+
+function getCallOptions(stageName: AnalyzeStage, startTime: number): CallLLMOptions {
+  const remaining = getRemainingBudgetMs(startTime)
+  if (remaining <= 15000) {
+    throw new Error('分析总耗时已接近上限，请简化需求后重试')
+  }
+  const timeoutMs = Math.max(15000, Math.min(STAGE_TIMEOUT_MS[stageName], remaining - 5000))
+  return {
+    timeoutMs,
+    maxRetries: 1,
+    stageName
+  }
+}
+
+function extractContentText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map(item => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object' && 'text' in item) {
+          const text = (item as { text?: unknown }).text
+          return typeof text === 'string' ? text : ''
+        }
+        return ''
+      })
+      .join('')
+  }
+  return ''
+}
+
+function extractBalancedJsonObject(input: string): string | null {
+  const text = input.trim()
+  const startIndex = text.indexOf('{')
+  if (startIndex === -1) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let i = startIndex; i < text.length; i++) {
+    const char = text[i]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      continue
+    }
+
+    if (char === '{') depth++
+    if (char === '}') {
+      depth--
+      if (depth === 0) {
+        return text.slice(startIndex, i + 1)
+      }
+    }
+  }
+
+  return null
+}
+
+function parseStructuredJsonContent(raw: string): any {
+  let cleanedContent = raw.trim()
+  const jsonBlockMatch = cleanedContent.match(/```json\s*([\s\S]*?)\s*```/)
+  if (jsonBlockMatch) {
+    cleanedContent = jsonBlockMatch[1]
+  } else {
+    const codeBlockMatch = cleanedContent.match(/```\s*([\s\S]*?)\s*```/)
+    if (codeBlockMatch) {
+      cleanedContent = codeBlockMatch[1]
+    }
+  }
+
+  const balancedJson = extractBalancedJsonObject(cleanedContent)
+  if (balancedJson) {
+    cleanedContent = balancedJson
+  }
+
+  const candidates = [
+    cleanedContent,
+    cleanedContent.replace(/,\s*([}\]])/g, '$1')
+  ]
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate)
+    } catch {}
+  }
+
+  throw new Error('Failed to parse LLM response as JSON')
+}
+
+function isSqlContentValid(sql: string): boolean {
+  const normalized = sql.toUpperCase()
+  if (normalized.length < 20) return false
+  return /(CREATE\s+(TABLE|INDEX|SEQUENCE|VIEW)|ALTER\s+TABLE|DROP\s+TABLE)/.test(normalized)
+}
+
+async function extractContentFromStandardResponse(response: Response): Promise<string> {
+  const text = await response.text()
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    console.error('LLM API returned non-JSON response:', text)
+    throw new Error(`LLM API returned invalid JSON: ${text.slice(0, 100)}...`)
+  }
+  const content = extractContentText(data?.choices?.[0]?.message?.content)
+  if (!content) {
+    throw new Error('LLM API returned empty content')
+  }
+  return content
+}
+
+async function extractContentFromStreamResponse(response: Response): Promise<string> {
+  if (!response.body) {
+    throw new Error('LLM API 返回了空响应流')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) {
+      buffer += decoder.decode()
+    } else {
+      buffer += decoder.decode(value, { stream: true })
+    }
+
+    const events = buffer.split('\n\n')
+    buffer = events.pop() || ''
+
+    for (const eventBlock of events) {
+      const dataLines = eventBlock
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).trimStart())
+
+      if (dataLines.length === 0) continue
+      const payload = dataLines.join('\n').trim()
+      if (!payload) continue
+      if (payload === '[DONE]') {
+        return content.trim()
+      }
+
+      let chunk: any
+      try {
+        chunk = JSON.parse(payload)
+      } catch {
+        continue
+      }
+
+      if (chunk?.error?.message) {
+        throw new Error(chunk.error.message)
+      }
+
+      const deltaText = extractContentText(chunk?.choices?.[0]?.delta?.content)
+      const messageText = extractContentText(chunk?.choices?.[0]?.message?.content)
+
+      if (deltaText) {
+        content += deltaText
+      } else if (messageText) {
+        const normalizedMessageText = messageText.trim()
+        if (normalizedMessageText.startsWith(content.trim())) {
+          content = normalizedMessageText
+        } else {
+          content += messageText
+        }
+      }
+    }
+
+    if (done) break
+  }
+
+  if (!content) {
+    throw new Error('LLM API returned empty content')
+  }
+  return content
+}
+
 async function callLLM(
   config: LLMConfig, 
   systemPrompt: string, 
   userMessage: string, 
   expectJson: boolean = true, 
-  textKey?: string
+  textKey?: string,
+  options: CallLLMOptions = { timeoutMs: 120000, maxRetries: 1, stageName: 'analysis' },
+  retryCount: number = 0
 ): Promise<any> {
   const baseUrl = config.baseUrl || 'https://api.openai.com/v1'
   const url = `${baseUrl}/chat/completions`
+  const useStream = true
 
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 120000) // 120s timeout per stage
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs)
 
   try {
     const response = await fetch(url, {
@@ -217,6 +441,7 @@ async function callLLM(
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userMessage }
         ],
+        stream: useStream,
         temperature: config.temperature,
         max_tokens: config.maxTokens
       }),
@@ -227,72 +452,85 @@ async function callLLM(
 
     if (!response.ok) {
       const errorText = await response.text()
+      if ((response.status === 429 || response.status >= 500) && retryCount < options.maxRetries) {
+        const backoff = 1200 * (retryCount + 1) + Math.floor(Math.random() * 400)
+        await sleep(backoff)
+        return callLLM(config, systemPrompt, userMessage, expectJson, textKey, options, retryCount + 1)
+      }
       throw new Error(`LLM API 调用失败: ${response.status} - ${errorText}`)
     }
 
-    const text = await response.text()
-    let data
-    try {
-      data = JSON.parse(text)
-    } catch (e) {
-        // Fallback parsing logic
-        console.error('LLM API returned non-JSON response:', text)
-        throw new Error(`LLM API returned invalid JSON: ${text.slice(0, 100)}...`)
-    }
-
-    const content = data.choices?.[0]?.message?.content
-    if (!content) {
-       throw new Error('LLM API returned empty content')
-    }
+    const content = useStream
+      ? await extractContentFromStreamResponse(response)
+      : await extractContentFromStandardResponse(response)
 
     if (!expectJson && textKey) {
         let cleanedContent = content.trim()
-        // 去除可能存在的 markdown 代码块包裹
         cleanedContent = cleanedContent.replace(/^```[\w]*\n?/i, '')
                                        .replace(/\n?```$/i, '')
                                        .trim()
+        if (textKey === 'sqlStatements' && !isSqlContentValid(cleanedContent)) {
+          throw new Error('SQL结果校验失败：未检测到有效 DDL 语句')
+        }
         return { [textKey]: cleanedContent }
     }
 
-    // Robust JSON extraction
-    let cleanedContent = content.trim()
-    const jsonBlockMatch = cleanedContent.match(/```json\s*([\s\S]*?)\s*```/)
-    if (jsonBlockMatch) {
-      cleanedContent = jsonBlockMatch[1]
-    } else {
-      const codeBlockMatch = cleanedContent.match(/```\s*([\s\S]*?)\s*```/)
-      if (codeBlockMatch) {
-        cleanedContent = codeBlockMatch[1]
-      }
-    }
-    
-    const firstBrace = cleanedContent.indexOf('{')
-    const lastBrace = cleanedContent.lastIndexOf('}')
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      cleanedContent = cleanedContent.substring(firstBrace, lastBrace + 1)
-    }
-
     try {
-      return JSON.parse(cleanedContent)
+      return parseStructuredJsonContent(content)
     } catch (e) {
+      const normalizedContent = content.trim()
+      const parseSample = normalizedContent.slice(0, 300).replace(/\s+/g, ' ')
+      console.error(`[${options.stageName}] JSON parse failed sample:`, parseSample)
       // 容错处理：如果模型没有返回 JSON 而是直接返回了 SQL 代码（通常包含 CREATE TABLE 或 CREATE DATABASE）
-      if (!cleanedContent.includes('{') && (cleanedContent.toUpperCase().includes('CREATE TABLE') || cleanedContent.toUpperCase().includes('CREATE DATABASE'))) {
+      if (!normalizedContent.includes('{') && (normalizedContent.toUpperCase().includes('CREATE TABLE') || normalizedContent.toUpperCase().includes('CREATE DATABASE'))) {
         return {
           sqlStatements: content.replace(/```sql/gi, '').replace(/```/g, '').replace(/^sql\n/i, '').trim()
         }
       }
       // 容错处理：如果是文档生成阶段返回了纯 Markdown
-      if (!cleanedContent.includes('{') && cleanedContent.includes('#')) {
+      if (!normalizedContent.includes('{') && normalizedContent.includes('#')) {
          return {
             designDocument: content.replace(/```markdown/gi, '').replace(/```/g, '').trim()
          }
       }
-      console.error('Failed to parse extracted JSON:', cleanedContent)
-      throw new Error('Failed to parse LLM response as JSON')
+      throw new Error(`Failed to parse LLM response as JSON (stage: ${options.stageName})`)
     }
 
   } catch (error) {
     clearTimeout(timeoutId)
+    if (error instanceof Error && error.name === 'AbortError') {
+      if (retryCount < options.maxRetries) {
+        const backoff = 1200 * (retryCount + 1) + Math.floor(Math.random() * 400)
+        await sleep(backoff)
+        return callLLM(config, systemPrompt, userMessage, expectJson, textKey, options, retryCount + 1)
+      }
+      throw new Error(`阶段 ${options.stageName} 调用超时（${Math.floor(options.timeoutMs / 1000)}秒），请重试或简化需求`)
+    }
+    if (error instanceof Error && retryCount < options.maxRetries) {
+      const causeCode = (error as Error & { cause?: { code?: string } }).cause?.code
+      const lowerMessage = error.message.toLowerCase()
+      const isRetryableNetworkError = causeCode === 'UND_ERR_CONNECT_TIMEOUT'
+        || lowerMessage.includes('fetch failed')
+        || lowerMessage.includes('network')
+        || lowerMessage.includes('connect timeout')
+      const isRetryableParseError = lowerMessage.includes('failed to parse llm response as json')
+      const isRetryableSqlValidationError = options.stageName === 'sql_generation' && lowerMessage.includes('sql结果校验失败')
+      if (isRetryableNetworkError) {
+        const backoff = 1200 * (retryCount + 1) + Math.floor(Math.random() * 400)
+        await sleep(backoff)
+        return callLLM(config, systemPrompt, userMessage, expectJson, textKey, options, retryCount + 1)
+      }
+      if (isRetryableParseError) {
+        const backoff = 800 * (retryCount + 1) + Math.floor(Math.random() * 300)
+        await sleep(backoff)
+        return callLLM(config, systemPrompt, userMessage, expectJson, textKey, options, retryCount + 1)
+      }
+      if (isRetryableSqlValidationError) {
+        const backoff = 800 * (retryCount + 1) + Math.floor(Math.random() * 300)
+        await sleep(backoff)
+        return callLLM(config, systemPrompt, userMessage, expectJson, textKey, options, retryCount + 1)
+      }
+    }
     throw error
   }
 }
@@ -301,8 +539,20 @@ export async function POST(request: NextRequest) {
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
   try {
+    const toBoolean = (value: unknown, fallback: boolean) => {
+      if (typeof value === 'boolean') return value
+      if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase()
+        if (normalized === 'true') return true
+        if (normalized === 'false') return false
+      }
+      return fallback
+    }
+
     const body = await request.json()
-    const { requirement } = body
+    const { requirement, options } = body
+    const enableOptimization = toBoolean(options?.enableOptimization, true)
+    const enableDocGeneration = toBoolean(options?.enableDocGeneration, true)
 
     if (!requirement || typeof requirement !== 'string') {
       return NextResponse.json(
@@ -324,17 +574,20 @@ export async function POST(request: NextRequest) {
     }
 
     // Check cache
-    const cachedHistory = await db.history.findFirst({
-      where: {
-        question: requirement,
-        status: 'success',
-        databaseType: llmConfig.databaseType || 'mysql',
-        createdAt: {
-          gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
-        }
-      },
-      orderBy: { createdAt: 'desc' }
-    })
+    const shouldUseCache = enableOptimization && enableDocGeneration
+    const cachedHistory = shouldUseCache
+      ? await db.history.findFirst({
+          where: {
+            question: requirement,
+            status: 'success',
+            databaseType: llmConfig.databaseType || 'mysql',
+            createdAt: {
+              gte: new Date(Date.now() - 24 * 60 * 60 * 1000)
+            }
+          },
+          orderBy: { createdAt: 'desc' }
+        })
+      : null
 
     if (cachedHistory) {
         // If cached, return immediately (not streaming for simplicity, or simulate stream)
@@ -369,8 +622,20 @@ export async function POST(request: NextRequest) {
         await writer!.write(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
     }
 
+    const withStageHeartbeat = async <T>(stage: AnalyzeStage, fn: () => Promise<T>): Promise<T> => {
+        const timer = setInterval(() => {
+            void sendEvent('heartbeat', { stage, timestamp: Date.now() })
+        }, HEARTBEAT_INTERVAL_MS)
+        try {
+            return await fn()
+        } finally {
+            clearInterval(timer)
+        }
+    }
+
     // Start processing in background
     ;(async () => {
+        let currentStage: AnalyzeStage = 'optimization'
         try {
             const config = {
                 provider: llmConfig.provider,
@@ -381,48 +646,86 @@ export async function POST(request: NextRequest) {
                 maxTokens: llmConfig.maxTokens,
                 databaseType: llmConfig.databaseType || 'mysql'
             }
+            const startedAt = Date.now()
 
             // Stage 1: Requirement Optimization
-            await sendEvent('stage_start', { stage: 'optimization', message: '正在进行需求扩展与优化...' })
-            const optimizationResult = await callLLM(config, getRequirementOptimizationPrompt(), requirement, false, 'optimizedRequirement')
-            if (!optimizationResult || typeof optimizationResult.optimizedRequirement !== 'string') {
-                throw new Error('需求优化阶段返回数据格式错误')
+            currentStage = 'optimization'
+            let optimizedRequirement = requirement;
+            let optimizationResult: any = { optimizedRequirement: requirement };
+            
+            if (enableOptimization) {
+                await sendEvent('stage_start', { stage: 'optimization', message: '正在进行需求扩展与优化...' })
+                optimizationResult = await withStageHeartbeat('optimization', () =>
+                  callLLM(config, getRequirementOptimizationPrompt(), requirement, false, 'optimizedRequirement', getCallOptions('optimization', startedAt))
+                )
+                if (!optimizationResult || typeof optimizationResult.optimizedRequirement !== 'string') {
+                    throw new Error('需求优化阶段返回数据格式错误')
+                }
+                await sendEvent('stage_done', { stage: 'optimization', data: optimizationResult })
+                optimizedRequirement = optimizationResult.optimizedRequirement;
+            } else {
+                await sendEvent('stage_start', { stage: 'optimization', message: '需求优化已关闭，跳过该阶段...' })
+                await sendEvent('stage_done', { stage: 'optimization', data: optimizationResult })
             }
-            await sendEvent('stage_done', { stage: 'optimization', data: optimizationResult })
-
-            const optimizedRequirement = optimizationResult.optimizedRequirement;
 
             // Stage 2: Requirement Analysis
+            currentStage = 'analysis'
             await sendEvent('stage_start', { stage: 'analysis', message: '正在提取核心关键点...' })
-            const analysisResult = await callLLM(config, getAnalysisPrompt(), optimizedRequirement, true)
+            const analysisResult = await withStageHeartbeat('analysis', () =>
+              callLLM(config, getAnalysisPrompt(), optimizedRequirement, true, undefined, getCallOptions('analysis', startedAt))
+            )
             if (!analysisResult || !Array.isArray(analysisResult.keyPoints)) {
                 throw new Error('需求分析阶段返回数据格式错误')
             }
             await sendEvent('stage_done', { stage: 'analysis', data: analysisResult })
 
             // Stage 3: Schema Design
+            currentStage = 'design'
             await sendEvent('stage_start', { stage: 'design', message: '正在设计表结构...' })
-            const schemaResult = await callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true)
+            const schemaResult = await withStageHeartbeat('design', () =>
+              callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true, undefined, getCallOptions('design', startedAt))
+            )
              if (!schemaResult || !Array.isArray(schemaResult.tables) || !Array.isArray(schemaResult.relations)) {
                 throw new Error('表结构设计阶段返回数据格式错误')
             }
             await sendEvent('stage_done', { stage: 'design', data: schemaResult })
 
             // Stage 4: SQL Generation
+            currentStage = 'sql_generation'
             await sendEvent('stage_start', { stage: 'sql_generation', message: '正在生成 SQL 语句...' })
-            const sqlGenerationResult = await callLLM(config, getSqlGenerationPrompt(config.databaseType, schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'sqlStatements')
+            const sqlGenerationResult = await withStageHeartbeat('sql_generation', () =>
+              callLLM(config, getSqlGenerationPrompt(config.databaseType, schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'sqlStatements', getCallOptions('sql_generation', startedAt))
+            )
             if (!sqlGenerationResult || typeof sqlGenerationResult.sqlStatements !== 'string') {
                  throw new Error('SQL生成阶段返回数据格式错误')
             }
             await sendEvent('stage_done', { stage: 'sql_generation', data: sqlGenerationResult })
 
             // Stage 5: Documentation Generation
-            await sendEvent('stage_start', { stage: 'doc_generation', message: '正在生成设计文档...' })
-            const docGenerationResult = await callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'designDocument')
-            if (!docGenerationResult || typeof docGenerationResult.designDocument !== 'string') {
-                 throw new Error('文档生成阶段返回数据格式错误')
+            currentStage = 'doc_generation'
+            let docGenerationResult: { designDocument: string } = { designDocument: '' }
+            
+            if (enableDocGeneration) {
+                await sendEvent('stage_start', { stage: 'doc_generation', message: '正在生成设计文档...' })
+                try {
+                    docGenerationResult = await withStageHeartbeat('doc_generation', () =>
+                      callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'designDocument', getCallOptions('doc_generation', startedAt))
+                    )
+                    if (!docGenerationResult || typeof docGenerationResult.designDocument !== 'string') {
+                        throw new Error('文档生成阶段返回数据格式错误')
+                    }
+                    await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : '文档生成超时'
+                    docGenerationResult = {
+                        designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n当前已返回可用的表结构、ER 图和 SQL 结果。`
+                    }
+                    await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
+                }
+            } else {
+                await sendEvent('stage_start', { stage: 'doc_generation', message: '跳过生成设计文档...' })
+                await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
             }
-            await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
 
             // Combine results
             const finalResult = {
@@ -451,7 +754,14 @@ export async function POST(request: NextRequest) {
         } catch (error) {
             console.error('Streaming error:', error)
             const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-            await sendEvent('error', { message: errorMessage })
+            const errorReason = errorMessage.toLowerCase().includes('failed to parse llm response as json')
+              ? 'json_parse_failed'
+              : errorMessage.includes('超时')
+                ? 'timeout'
+                : errorMessage.includes('校验失败')
+                  ? 'validation_failed'
+                  : 'unknown'
+            await sendEvent('error', { message: errorMessage, stage: currentStage, reason: errorReason })
         } finally {
             await writer!.close()
         }

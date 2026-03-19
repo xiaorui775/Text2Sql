@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   Sheet,
   SheetContent,
@@ -47,27 +47,30 @@ export function HistoryList() {
   const [selectedItem, setSelectedItem] = useState<HistoryItem | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [pendingDeleteItem, setPendingDeleteItem] = useState<HistoryItem | null>(null)
+  
+  const [total, setTotal] = useState(0)
 
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
     setLoading(true)
     try {
       const res = await fetch('/api/history')
       if (res.ok) {
         const data = await res.json()
-        setHistory(data)
+        setHistory(data.data)
+        setTotal(data.total ?? data.data.length)
       }
     } catch (error) {
       console.error('Failed to fetch history:', error)
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     if (open) {
       fetchHistory()
     }
-  }, [open])
+  }, [open, fetchHistory])
 
   const deleteHistoryItem = async (item: HistoryItem) => {
     setDeletingId(item.id)
@@ -109,15 +112,15 @@ export function HistoryList() {
             <HistoryIcon className="h-6 w-6" />
           </Button>
         </SheetTrigger>
-        <SheetContent className="w-[400px] sm:w-[540px]">
-          <SheetHeader>
+        <SheetContent className="w-[400px] sm:w-[540px] flex flex-col h-full">
+          <SheetHeader className="shrink-0">
             <SheetTitle>历史记录</SheetTitle>
             <SheetDescription>
-              查看过往设计方案
+              查看过往设计方案（共 {total} 条）
             </SheetDescription>
           </SheetHeader>
           
-          <ScrollArea className="h-[calc(100vh-120px)] mt-6 pr-4">
+          <ScrollArea className="flex-1 mt-4 pr-4 -mr-4 overflow-y-auto">
             {loading ? (
               <div className="flex justify-center py-8">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />

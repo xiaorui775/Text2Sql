@@ -1,16 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const history = await db.history.findMany({
-      orderBy: {
-        createdAt: 'desc'
-      },
-      take: 50 // Limit to last 50 records
-    })
+    const [history, total] = await Promise.all([
+      db.history.findMany({
+        orderBy: {
+          createdAt: 'desc'
+        }
+      }),
+      db.history.count()
+    ])
 
-    return NextResponse.json(history)
+    return NextResponse.json({
+      data: history,
+      total
+    })
   } catch (error) {
     console.error('Failed to fetch history:', error)
     return NextResponse.json(

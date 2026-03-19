@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -11,6 +11,8 @@ import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2,
 import { toast } from 'sonner'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
 import ERDiagram from '@/components/er-diagram'
 import SettingsDialog from '@/components/settings-dialog'
 import { ErrorDialog } from '@/components/error-dialog'
@@ -59,14 +61,6 @@ const DATABASE_LABELS: Record<string, string> = {
   clickhouse: 'ClickHouse'
 }
 
-const STAGES = [
-  { id: 'optimization', label: '需求优化' },
-  { id: 'analysis', label: '提取关键点' },
-  { id: 'design', label: '表结构设计' },
-  { id: 'sql_generation', label: '生成 SQL' },
-  { id: 'doc_generation', label: '生成文档' }
-]
-
 export default function Home() {
   const [requirement, setRequirement] = useState('')
   const [isLoading, setIsLoading] = useState(false)
@@ -76,6 +70,24 @@ export default function Home() {
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
   const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
   const [currentStage, setCurrentStage] = useState<string>('')
+  
+  // Settings for analysis
+  const [enableOptimization, setEnableOptimization] = useState(true)
+  const [enableDocGeneration, setEnableDocGeneration] = useState(true)
+
+  const STAGES = useMemo(() => {
+    const stages = []
+    stages.push({ id: 'optimization', label: enableOptimization ? '需求优化' : '跳过需求优化' })
+    stages.push(
+      { id: 'analysis', label: '提取关键点' },
+      { id: 'design', label: '表结构设计' },
+      { id: 'sql_generation', label: '生成 SQL' }
+    )
+    if (enableDocGeneration) {
+      stages.push({ id: 'doc_generation', label: '生成文档' })
+    }
+    return stages
+  }, [enableOptimization, enableDocGeneration])
 
   // 检查配置状态
   const checkConfig = useCallback(async () => {
@@ -121,7 +133,13 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ requirement }),
+        body: JSON.stringify({ 
+          requirement,
+          options: {
+            enableOptimization,
+            enableDocGeneration
+          }
+        }),
       })
 
       if (!response.ok) {
@@ -142,8 +160,9 @@ export default function Home() {
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      let streamErrorMessage = ''
 
-      while (true) {
+      outer: while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
@@ -156,17 +175,22 @@ export default function Home() {
         for (const line of lines) {
             if (line.startsWith('event: ')) {
                 const eventMatch = line.match(/^event: (.*)$/m)
-                const dataMatch = line.match(/^data: (.*)$/m)
+                const dataLines = line
+                  .split('\n')
+                  .filter(segment => segment.startsWith('data:'))
+                  .map(segment => segment.slice(5).trimStart())
                 
-                if (eventMatch && dataMatch) {
+                if (eventMatch && dataLines.length > 0) {
                     const event = eventMatch[1]
-                    const dataStr = dataMatch[1]
+                    const dataStr = dataLines.join('\n')
                     
                     try {
                         const data = JSON.parse(dataStr)
                         
                         if (event === 'stage_start') {
                             setCurrentStage(data.stage)
+                        } else if (event === 'heartbeat') {
+                            continue
                         } else if (event === 'stage_done') {
                             if (data.stage === 'optimization') {
                                 setResult(prev => prev ? ({ ...prev, optimizedRequirement: data.data.optimizedRequirement }) : prev)
@@ -184,13 +208,20 @@ export default function Home() {
                                     ...prev, 
                                     designDocument: data.data.designDocument 
                                 }) : prev)
+                                if (data.partial && data.error) {
+                                    toast.error(`文档阶段未完整完成：${data.error}`)
+                                }
                             }
                         } else if (event === 'final_result') {
                             setResult(data)
                             toast.success('分析完成')
                             setIsLoading(false)
                         } else if (event === 'error') {
-                            throw new Error(data.message)
+                            const stageLabel = typeof data.stage === 'string' ? `阶段 ${data.stage}` : '未知阶段'
+                            const reasonLabel = typeof data.reason === 'string' ? `（${data.reason}）` : ''
+                            const baseMessage = typeof data.message === 'string' ? data.message : '分析过程中出现错误，请重试'
+                            streamErrorMessage = `${stageLabel}${reasonLabel}：${baseMessage}`
+                            break outer
                         }
                     } catch (e) {
                         console.error('Failed to parse SSE data:', e)
@@ -200,13 +231,17 @@ export default function Home() {
         }
       }
 
+      if (streamErrorMessage) {
+        throw new Error(streamErrorMessage)
+      }
+
     } catch (error) {
       console.error('Error:', error)
       const message = error instanceof Error ? error.message : '分析过程中出现错误，请重试'
       setErrorDialog({ open: true, message })
       setIsLoading(false)
     }
-  }, [requirement])
+  }, [requirement, enableOptimization, enableDocGeneration])
 
   const copySql = useCallback(async () => {
     if (result?.sqlStatements) {
@@ -338,27 +373,53 @@ export default function Home() {
                 className="flex-1 resize-none text-base leading-relaxed border-slate-200 focus:border-emerald-500 focus:ring-emerald-500/20 min-h-0"
                 disabled={isLoading}
               />
-              <div className="flex items-center justify-between shrink-0">
-                <span className="text-sm text-slate-500">
-                  <kbd className="px-2 py-0.5 bg-slate-100 rounded text-xs font-mono">Ctrl + Enter</kbd> 快速生成
-                </span>
-                <Button
-                  onClick={analyzeRequirement}
-                  disabled={isLoading || !requirement.trim() || hasConfig === false}
-                  className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white shadow-lg shadow-emerald-500/25 px-6 min-w-[140px]"
-                >
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      正在生成...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-4 h-4 mr-2" />
-                      生成设计
-                    </>
-                  )}
-                </Button>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between shrink-0 gap-4">
+                <div className="flex items-center gap-6">
+                  <div className="flex items-center space-x-2">
+                    <Switch 
+                      id="optimization" 
+                      checked={enableOptimization}
+                      onCheckedChange={setEnableOptimization}
+                      disabled={isLoading}
+                    />
+                    <Label htmlFor="optimization" className="text-sm text-slate-600 dark:text-slate-400 cursor-pointer">
+                      需求优化
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <Switch 
+                      id="doc-gen" 
+                      checked={enableDocGeneration}
+                      onCheckedChange={setEnableDocGeneration}
+                      disabled={isLoading}
+                    />
+                    <Label htmlFor="doc-gen" className="text-sm text-slate-600 dark:text-slate-400 cursor-pointer">
+                      生成文档
+                    </Label>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <span className="text-sm text-slate-500 hidden sm:inline-block">
+                    <kbd className="px-2 py-0.5 bg-slate-100 dark:bg-slate-800 rounded text-xs font-mono">Ctrl + Enter</kbd> 快速生成
+                  </span>
+                  <Button
+                    onClick={analyzeRequirement}
+                    disabled={isLoading || !requirement.trim() || hasConfig === false}
+                    className="bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white shadow-lg shadow-emerald-500/25 px-6 min-w-[140px]"
+                  >
+                    {isLoading ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        正在生成...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4 mr-2" />
+                        生成设计
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -522,30 +583,19 @@ export default function Home() {
 
                   {/* ER Diagram Tab */}
                   <TabsContent value="er" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
-                    <div className="border border-slate-200 dark:border-slate-700 rounded-lg bg-slate-50 dark:bg-slate-800/50 flex-1 relative overflow-auto">
+                    <div className="border border-slate-200 dark:border-slate-700 rounded-lg bg-slate-50 dark:bg-slate-800/50 flex-1 relative overflow-hidden">
                       {result.tables.length > 0 ? (
-                        <div className="min-w-full min-h-full">
-                          <ERDiagram tables={result.tables} relations={result.relations} />
-                        </div>
+                        <ERDiagram 
+                          tables={result.tables} 
+                          relations={result.relations}
+                          fullHeight={true}
+                          className="h-full"
+                        />
                       ) : (
                         <div className="flex items-center justify-center h-full text-slate-400 absolute inset-0">
                             {isLoading ? "正在设计表结构..." : "暂无 ER 图数据"}
                         </div>
                       )}
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2 shrink-0">
-                      <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-400 dark:border-emerald-800">
-                        PK = 主键
-                      </Badge>
-                      <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800">
-                        FK = 外键
-                      </Badge>
-                      <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800">
-                        1:N = 一对多
-                      </Badge>
-                      <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800">
-                        N:M = 多对多
-                      </Badge>
                     </div>
                   </TabsContent>
 

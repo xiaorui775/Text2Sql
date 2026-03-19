@@ -46,6 +46,33 @@ interface TablePosition {
   typeX: number
 }
 
+interface RelationEndpoints {
+  fromX: number
+  fromY: number
+  toX: number
+  toY: number
+}
+
+interface RelationCurve {
+  fromX: number
+  fromY: number
+  toX: number
+  toY: number
+  midX: number
+  midY: number
+  control1X: number
+  control1Y: number
+  control2X: number
+  control2Y: number
+}
+
+const HEADER_HEIGHT = 40
+const ROW_HEIGHT = 28
+const FIELD_CENTER_OFFSET = 14
+const LABEL_WIDTH = 44
+const LABEL_HEIGHT = 22
+const LABEL_SAFE_GAP = 8
+
 function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   const positions: Record<string, TablePosition> = {}
   
@@ -70,8 +97,8 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   const typeX = nameStartX + maxNameWidth + gap
   const tableWidth = Math.max(180, typeX + maxTypeWidth + padding)
   
-  const rowHeight = 28
-  const headerHeight = 40
+  const rowHeight = ROW_HEIGHT
+  const headerHeight = HEADER_HEIGHT
   const horizontalGap = 150
   const verticalGap = 100
   
@@ -109,6 +136,131 @@ function getRelationColor(relationType: string) {
 
 function getRelationLabel(relationType: string) {
   return relationType
+}
+
+function getRelationEndpoints(
+  relation: TableRelation,
+  positions: Record<string, TablePosition>,
+  tables: TableSchema[]
+): RelationEndpoints | null {
+  const fromPos = positions[relation.fromTable]
+  const toPos = positions[relation.toTable]
+  if (!fromPos || !toPos) return null
+
+  const fromFieldIndex = tables.find(t => t.name === relation.fromTable)?.fields.findIndex(f => f.name === relation.fromField) ?? -1
+  const toFieldIndex = tables.find(t => t.name === relation.toTable)?.fields.findIndex(f => f.name === relation.toField) ?? -1
+  if (fromFieldIndex === -1 || toFieldIndex === -1) return null
+
+  const isFromRight = fromPos.x > toPos.x
+  const isFromBelow = fromPos.y > toPos.y
+
+  let fromX: number
+  let fromY: number
+  let toX: number
+  let toY: number
+
+  if (Math.abs(fromPos.y - toPos.y) > Math.abs(fromPos.x - toPos.x)) {
+    fromX = fromPos.x + fromPos.width / 2
+    toX = toPos.x + toPos.width / 2
+    fromY = isFromBelow ? fromPos.y : fromPos.y + fromPos.height
+    toY = isFromBelow ? toPos.y + toPos.height : toPos.y
+  } else {
+    fromX = isFromRight ? fromPos.x : fromPos.x + fromPos.width
+    fromY = fromPos.y + HEADER_HEIGHT + fromFieldIndex * ROW_HEIGHT + FIELD_CENTER_OFFSET
+    toX = isFromRight ? toPos.x + toPos.width : toPos.x
+    toY = toPos.y + HEADER_HEIGHT + toFieldIndex * ROW_HEIGHT + FIELD_CENTER_OFFSET
+  }
+
+  return { fromX, fromY, toX, toY }
+}
+
+function intersectsTable(
+  centerX: number,
+  centerY: number,
+  width: number,
+  height: number,
+  positions: Record<string, TablePosition>
+) {
+  const left = centerX - width / 2 - LABEL_SAFE_GAP
+  const right = centerX + width / 2 + LABEL_SAFE_GAP
+  const top = centerY - height / 2 - LABEL_SAFE_GAP
+  const bottom = centerY + height / 2 + LABEL_SAFE_GAP
+
+  return Object.values(positions).some((pos) => {
+    const tableLeft = pos.x
+    const tableRight = pos.x + pos.width
+    const tableTop = pos.y
+    const tableBottom = pos.y + pos.height
+
+    return !(right < tableLeft || left > tableRight || bottom < tableTop || top > tableBottom)
+  })
+}
+
+function getRelationCurve(endpoints: RelationEndpoints): RelationCurve {
+  const dx = endpoints.toX - endpoints.fromX
+  const dy = endpoints.toY - endpoints.fromY
+  const isVertical = Math.abs(dy) > Math.abs(dx)
+  const controlOffset = Math.min(Math.abs(dx), Math.abs(dy)) * 0.5
+  const midX = (endpoints.fromX + endpoints.toX) / 2
+  const midY = (endpoints.fromY + endpoints.toY) / 2
+  const direction = endpoints.fromX < endpoints.toX ? 1 : -1
+
+  return {
+    fromX: endpoints.fromX,
+    fromY: endpoints.fromY,
+    toX: endpoints.toX,
+    toY: endpoints.toY,
+    midX,
+    midY,
+    control1X: endpoints.fromX + (isVertical ? 0 : controlOffset * direction),
+    control1Y: midY,
+    control2X: endpoints.toX - (isVertical ? 0 : controlOffset * direction),
+    control2Y: midY
+  }
+}
+
+function quadraticPoint(p0: number, p1: number, p2: number, t: number) {
+  const oneMinusT = 1 - t
+  return oneMinusT * oneMinusT * p0 + 2 * oneMinusT * t * p1 + t * t * p2
+}
+
+function pointOnCurve(curve: RelationCurve, t: number) {
+  const clamped = Math.max(0, Math.min(1, t))
+  if (clamped <= 0.5) {
+    const localT = clamped * 2
+    return {
+      x: quadraticPoint(curve.fromX, curve.control1X, curve.midX, localT),
+      y: quadraticPoint(curve.fromY, curve.control1Y, curve.midY, localT)
+    }
+  }
+
+  const localT = (clamped - 0.5) * 2
+  return {
+    x: quadraticPoint(curve.midX, curve.control2X, curve.toX, localT),
+    y: quadraticPoint(curve.midY, curve.control2Y, curve.toY, localT)
+  }
+}
+
+function getLabelPosition(
+  curve: RelationCurve,
+  positions: Record<string, TablePosition>
+) {
+  const maxShift = 0.42
+  const shiftStep = 0.06
+  const shifts = [0]
+  for (let shift = shiftStep; shift <= maxShift; shift += shiftStep) {
+    shifts.push(shift, -shift)
+  }
+
+  for (const shift of shifts) {
+    const t = Math.min(0.92, Math.max(0.08, 0.5 + shift))
+    const { x, y } = pointOnCurve(curve, t)
+    if (!intersectsTable(x, y, LABEL_WIDTH, LABEL_HEIGHT, positions)) {
+      return { x, y }
+    }
+  }
+
+  return pointOnCurve(curve, 0.5)
 }
 
 export default function ERDiagram({ tables, relations, className, fullHeight = false }: ERDiagramProps) {
@@ -206,42 +358,15 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
         <svg ref={svgRef} width={svgSize.width} height={svgSize.height} className="min-w-full">
           <g className="relations">
             {relations.map((relation, index) => {
-              const fromPos = positions[relation.fromTable]
-              const toPos = positions[relation.toTable]
-              if (!fromPos || !toPos) return null
-              
-              const fromFieldIndex = tables.find(t => t.name === relation.fromTable)?.fields.findIndex(f => f.name === relation.fromField) ?? -1
-              const toFieldIndex = tables.find(t => t.name === relation.toTable)?.fields.findIndex(f => f.name === relation.toField) ?? -1
-              if (fromFieldIndex === -1 || toFieldIndex === -1) return null
-              
-              const isFromRight = fromPos.x > toPos.x
-              const isFromBelow = fromPos.y > toPos.y
-              
-              let fromX, fromY, toX, toY
-              if (Math.abs(fromPos.y - toPos.y) > Math.abs(fromPos.x - toPos.x)) {
-                fromX = fromPos.x + fromPos.width / 2
-                toX = toPos.x + toPos.width / 2
-                fromY = isFromBelow ? fromPos.y : fromPos.y + fromPos.height
-                toY = isFromBelow ? toPos.y + toPos.height : toPos.y
-              } else {
-                fromX = isFromRight ? fromPos.x : fromPos.x + fromPos.width
-                fromY = fromPos.y + 40 + fromFieldIndex * 28 + 14
-                toX = isFromRight ? toPos.x + toPos.width : toPos.x
-                toY = toPos.y + 40 + toFieldIndex * 28 + 14
-              }
-              
-              const dx = toX - fromX
-              const dy = toY - fromY
-              const isVertical = Math.abs(dy) > Math.abs(dx)
-              const controlOffset = Math.min(Math.abs(dx), Math.abs(dy)) * 0.5
-              const midX = (fromX + toX) / 2
-              const midY = (fromY + toY) / 2
+              const endpoints = getRelationEndpoints(relation, positions, tables)
+              if (!endpoints) return null
+              const curve = getRelationCurve(endpoints)
               const color = getRelationColor(relation.relationType)
 
               return (
                 <g key={index}>
                   <path
-                    d={`M ${fromX} ${fromY} Q ${fromX + (isVertical ? 0 : controlOffset * (fromX < toX ? 1 : -1))} ${midY} ${midX} ${midY} Q ${toX - (isVertical ? 0 : controlOffset * (fromX < toX ? 1 : -1))} ${midY} ${toX} ${toY}`}
+                    d={`M ${curve.fromX} ${curve.fromY} Q ${curve.control1X} ${curve.control1Y} ${curve.midX} ${curve.midY} Q ${curve.control2X} ${curve.control2Y} ${curve.toX} ${curve.toY}`}
                     fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                     strokeDasharray={relation.relationType === 'N:M' ? '5,5' : 'none'}
                     style={{ opacity: 0.7 }}
@@ -284,35 +409,16 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
 
           <g className="relation-labels">
             {relations.map((relation, index) => {
-              const fromPos = positions[relation.fromTable]
-              const toPos = positions[relation.toTable]
-              if (!fromPos || !toPos) return null
-              const fromFieldIndex = tables.find(t => t.name === relation.fromTable)?.fields.findIndex(f => f.name === relation.fromField) ?? -1
-              const toFieldIndex = tables.find(t => t.name === relation.toTable)?.fields.findIndex(f => f.name === relation.toField) ?? -1
-              if (fromFieldIndex === -1 || toFieldIndex === -1) return null
-              
-              const isFromRight = fromPos.x > toPos.x
-              const isFromBelow = fromPos.y > toPos.y
-              let fromX, fromY, toX, toY
-              if (Math.abs(fromPos.y - toPos.y) > Math.abs(fromPos.x - toPos.x)) {
-                fromX = fromPos.x + fromPos.width / 2
-                toX = toPos.x + toPos.width / 2
-                fromY = isFromBelow ? fromPos.y : fromPos.y + fromPos.height
-                toY = isFromBelow ? toPos.y + toPos.height : toPos.y
-              } else {
-                fromX = isFromRight ? fromPos.x : fromPos.x + fromPos.width
-                fromY = fromPos.y + 40 + fromFieldIndex * 28 + 14
-                toX = isFromRight ? toPos.x + toPos.width : toPos.x
-                toY = toPos.y + 40 + toFieldIndex * 28 + 14
-              }
-              const midX = (fromX + toX) / 2
-              const midY = (fromY + toY) / 2
+              const endpoints = getRelationEndpoints(relation, positions, tables)
+              if (!endpoints) return null
+              const curve = getRelationCurve(endpoints)
+              const labelPos = getLabelPosition(curve, positions)
               const color = getRelationColor(relation.relationType)
 
               return (
                 <g key={index}>
-                  <rect x={midX - 20} y={midY - 10} width="40" height="20" rx="4" fill="white" stroke={color} strokeWidth="1" />
-                  <text x={midX} y={midY + 4} textAnchor="middle" fontSize="11" fontWeight="600" fill={color}>{relation.relationType}</text>
+                  <rect x={labelPos.x - LABEL_WIDTH / 2} y={labelPos.y - LABEL_HEIGHT / 2} width={LABEL_WIDTH} height={LABEL_HEIGHT} rx="4" fill="white" stroke={color} strokeWidth="1" />
+                  <text x={labelPos.x} y={labelPos.y + 4} textAnchor="middle" fontSize="11" fontWeight="600" fill={color}>{getRelationLabel(relation.relationType)}</text>
                 </g>
               )
             })}
@@ -320,27 +426,9 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
 
           <g className="relation-dots">
             {relations.map((relation, index) => {
-              const fromPos = positions[relation.fromTable]
-              const toPos = positions[relation.toTable]
-              if (!fromPos || !toPos) return null
-              const fromFieldIndex = tables.find(t => t.name === relation.fromTable)?.fields.findIndex(f => f.name === relation.fromField) ?? -1
-              const toFieldIndex = tables.find(t => t.name === relation.toTable)?.fields.findIndex(f => f.name === relation.toField) ?? -1
-              if (fromFieldIndex === -1 || toFieldIndex === -1) return null
-              
-              const isFromRight = fromPos.x > toPos.x
-              const isFromBelow = fromPos.y > toPos.y
-              let fromX, fromY, toX, toY
-              if (Math.abs(fromPos.y - toPos.y) > Math.abs(fromPos.x - toPos.x)) {
-                fromX = fromPos.x + fromPos.width / 2
-                toX = toPos.x + toPos.width / 2
-                fromY = isFromBelow ? fromPos.y : fromPos.y + fromPos.height
-                toY = isFromBelow ? toPos.y + toPos.height : toPos.y
-              } else {
-                fromX = isFromRight ? fromPos.x : fromPos.x + fromPos.width
-                fromY = fromPos.y + 40 + fromFieldIndex * 28 + 14
-                toX = isFromRight ? toPos.x + toPos.width : toPos.x
-                toY = toPos.y + 40 + toFieldIndex * 28 + 14
-              }
+              const endpoints = getRelationEndpoints(relation, positions, tables)
+              if (!endpoints) return null
+              const { fromX, fromY, toX, toY } = endpoints
               const color = getRelationColor(relation.relationType)
               return (
                 <g key={`dot-${index}`}>
