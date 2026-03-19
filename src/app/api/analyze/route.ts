@@ -84,6 +84,8 @@ function getRequirementOptimizationPrompt(): string {
 你需要补充潜在的业务逻辑、隐式需求（例如：必要的审计字段、权限控制、状态流转、软删除等），输出一段详细、结构化的标准业务需求描述，以便后续的数据库架构师能根据你的描述设计出健壮的表结构。
 
 【极度重要】：
+你只能保留可用于数据库建模的信息：实体、字段、字段约束、主外键关系、索引建议、状态流转、审计字段、业务规则。
+必须忽略并剔除 UI/样式/前端实现细节，例如：页面布局、按钮、颜色、间距、字体、动效、组件库、响应式适配、交互文案。
 请直接返回详细的业务需求描述，不要任何解释性文字！不要返回 JSON 格式！`
 }
 
@@ -91,6 +93,8 @@ function getRequirementOptimizationPrompt(): string {
 function getAnalysisPrompt(): string {
   return `你是一个资深的业务分析师。
 请分析用户的产品需求描述，提取出核心功能关键点。
+关键点必须只包含可映射到数据库建模的信息（实体、字段、关系、约束、索引、状态、审计）。
+关键点严禁包含 UI、页面、样式、交互动画、组件实现等无关内容。
 
 【极度重要】：
 你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字！
@@ -179,6 +183,59 @@ ${JSON.stringify({ tables, relations }, null, 2)}
 【极度重要】：
 请直接返回完整的数据库设计文档（Markdown格式，使用 # 等标题层级，对于数据字典和表关系请使用标准的 Markdown 表格形式展示），不要任何解释性文字！不要返回 JSON 格式！
 `
+}
+
+const UI_NOISE_TERMS = [
+  'ui', 'ux', 'figma', 'css', 'scss', 'sass', 'tailwind', 'bootstrap', 'material ui',
+  '页面', '界面', '按钮', '颜色', '配色', '字体', '字号', '圆角', '阴影', '布局', '响应式',
+  '动效', '动画', '交互', '弹窗', '抽屉', '导航栏', '卡片', '组件'
+]
+
+const BUSINESS_SIGNAL_TERMS = [
+  'entity', 'table', 'field', 'column', 'index', 'foreign key', 'primary key', 'constraint',
+  'workflow', 'status', 'audit', 'relation', 'schema',
+  '实体', '表', '字段', '列', '索引', '主键', '外键', '约束', '状态', '流程', '审计', '关系', '模型'
+]
+
+function sanitizeBusinessRequirement(input: string): string {
+  const normalized = input.replace(/\r/g, '').trim()
+  if (!normalized) return ''
+
+  const sentences = normalized
+    .split('\n')
+    .flatMap(line => line.split(/(?<=[。！？!?；;])/))
+    .map(s => s.trim())
+    .filter(Boolean)
+
+  const cleaned = sentences.filter(sentence => {
+    const lower = sentence.toLowerCase()
+    const hasBusinessSignal = BUSINESS_SIGNAL_TERMS.some(term => lower.includes(term))
+    const hasUiNoise = UI_NOISE_TERMS.some(term => lower.includes(term))
+    if (hasBusinessSignal) return true
+    if (hasUiNoise) return false
+    return sentence.length >= 8
+  })
+
+  return cleaned.join('\n').trim()
+}
+
+function sanitizeKeyPoints(points: string[]): string[] {
+  const seen = new Set<string>()
+  const cleaned: string[] = []
+
+  for (const point of points) {
+    const text = point.trim()
+    if (!text) continue
+    const lower = text.toLowerCase()
+    const hasBusinessSignal = BUSINESS_SIGNAL_TERMS.some(term => lower.includes(term))
+    const hasUiNoise = UI_NOISE_TERMS.some(term => lower.includes(term))
+    if (hasUiNoise && !hasBusinessSignal) continue
+    if (seen.has(text)) continue
+    seen.add(text)
+    cleaned.push(text)
+  }
+
+  return cleaned
 }
 
 interface LLMConfig {
@@ -388,21 +445,28 @@ export async function POST(request: NextRequest) {
             if (!optimizationResult || typeof optimizationResult.optimizedRequirement !== 'string') {
                 throw new Error('需求优化阶段返回数据格式错误')
             }
-            await sendEvent('stage_done', { stage: 'optimization', data: optimizationResult })
-
-            const optimizedRequirement = optimizationResult.optimizedRequirement;
+            const sanitizedRequirement = sanitizeBusinessRequirement(optimizationResult.optimizedRequirement)
+            if (!sanitizedRequirement) {
+                throw new Error('需求优化阶段未提取到可用于建表的业务信息')
+            }
+            await sendEvent('stage_done', { stage: 'optimization', data: { optimizedRequirement: sanitizedRequirement } })
 
             // Stage 2: Requirement Analysis
             await sendEvent('stage_start', { stage: 'analysis', message: '正在提取核心关键点...' })
-            const analysisResult = await callLLM(config, getAnalysisPrompt(), optimizedRequirement, true)
+            const analysisResult = await callLLM(config, getAnalysisPrompt(), sanitizedRequirement, true)
             if (!analysisResult || !Array.isArray(analysisResult.keyPoints)) {
                 throw new Error('需求分析阶段返回数据格式错误')
             }
-            await sendEvent('stage_done', { stage: 'analysis', data: analysisResult })
+            const sanitizedKeyPoints = sanitizeKeyPoints(analysisResult.keyPoints)
+            if (sanitizedKeyPoints.length === 0) {
+                throw new Error('需求分析阶段未提取到可用于建表的关键点')
+            }
+            const normalizedAnalysisResult = { ...analysisResult, keyPoints: sanitizedKeyPoints }
+            await sendEvent('stage_done', { stage: 'analysis', data: normalizedAnalysisResult })
 
             // Stage 3: Schema Design
             await sendEvent('stage_start', { stage: 'design', message: '正在设计表结构...' })
-            const schemaResult = await callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true)
+            const schemaResult = await callLLM(config, getSchemaDesignPrompt(config.databaseType, sanitizedKeyPoints), JSON.stringify(normalizedAnalysisResult), true)
              if (!schemaResult || !Array.isArray(schemaResult.tables) || !Array.isArray(schemaResult.relations)) {
                 throw new Error('表结构设计阶段返回数据格式错误')
             }
@@ -426,8 +490,8 @@ export async function POST(request: NextRequest) {
 
             // Combine results
             const finalResult = {
-                optimizedRequirement: optimizationResult.optimizedRequirement,
-                keyPoints: analysisResult.keyPoints,
+                optimizedRequirement: sanitizedRequirement,
+                keyPoints: sanitizedKeyPoints,
                 tables: schemaResult.tables,
                 relations: schemaResult.relations,
                 sqlStatements: sqlGenerationResult.sqlStatements,
