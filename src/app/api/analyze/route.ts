@@ -79,12 +79,16 @@ COMMENT ON TABLE USERS IS '用户表';
 
 // Stage 1: Requirement Optimization
 function getRequirementOptimizationPrompt(): string {
-  return `你是一个资深的产品经理兼业务架构师。
-用户输入的产品需求往往是口语化、简短或缺乏细节的。你的任务是接收用户的原始需求，结合行业经验，对其进行**脑补、细化和专业化翻译**。
-你需要补充潜在的业务逻辑、隐式需求（例如：必要的审计字段、权限控制、状态流转、软删除等），输出一段详细、结构化的标准业务需求描述，以便后续的数据库架构师能根据你的描述设计出健壮的表结构。
+  return `你是一个资深业务分析师。
+你的任务是对用户原始需求做“需求提炼”，目标只有三个：
+1) 提取关键信息：保留可用于数据库建模的业务实体、关系、约束、状态、流程与规则。
+2) 精炼需求表达：将口语化、重复或松散描述整理为清晰、紧凑、可执行的业务需求文本。
+3) 剔除无效干扰：删除与建模无关内容，如 UI 设计、页面样式、交互动效、营销文案、泛化口号、实现细节噪声等。
 
-【极度重要】：
-请直接返回详细的业务需求描述，不要任何解释性文字！不要返回 JSON 格式！`
+输出要求：
+- 只输出最终的“提炼后需求文本”。
+- 使用中文，分段清晰，语义准确。
+- 不要输出 JSON，不要输出 markdown 代码块，不要解释你的处理过程。`
 }
 
 // Stage 2: Requirement Analysis
@@ -200,6 +204,7 @@ interface CallLLMOptions {
   timeoutMs: number
   maxRetries: number
   stageName: AnalyzeStage
+  useStream?: boolean
 }
 
 const ANALYZE_TOTAL_BUDGET_MS = 270000
@@ -231,6 +236,17 @@ function getCallOptions(stageName: AnalyzeStage, startTime: number): CallLLMOpti
     maxRetries: 1,
     stageName
   }
+}
+
+function shouldFallbackToNonStream(error: unknown, stageName: AnalyzeStage): boolean {
+  if (stageName !== 'design' && stageName !== 'sql_generation') return false
+  if (!(error instanceof Error)) return false
+  const message = error.message.toLowerCase()
+  return message.includes('failed to parse llm response as json')
+    || message.includes('llm api returned empty content')
+    || message.includes('llm api returned invalid json')
+    || message.includes('unexpected end')
+    || (stageName === 'sql_generation' && message.includes('sql结果校验失败'))
 }
 
 function extractContentText(content: unknown): string {
@@ -423,7 +439,7 @@ async function callLLM(
 ): Promise<any> {
   const baseUrl = config.baseUrl || 'https://api.openai.com/v1'
   const url = `${baseUrl}/chat/completions`
-  const useStream = true
+  const useStream = options.useStream ?? true
 
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs)
@@ -654,7 +670,7 @@ export async function POST(request: NextRequest) {
             let optimizationResult: any = { optimizedRequirement: requirement };
             
             if (enableOptimization) {
-                await sendEvent('stage_start', { stage: 'optimization', message: '正在进行需求扩展与优化...' })
+                await sendEvent('stage_start', { stage: 'optimization', message: '正在提取关键信息并精炼需求...' })
                 optimizationResult = await withStageHeartbeat('optimization', () =>
                   callLLM(config, getRequirementOptimizationPrompt(), requirement, false, 'optimizedRequirement', getCallOptions('optimization', startedAt))
                 )
@@ -682,9 +698,20 @@ export async function POST(request: NextRequest) {
             // Stage 3: Schema Design
             currentStage = 'design'
             await sendEvent('stage_start', { stage: 'design', message: '正在设计表结构...' })
-            const schemaResult = await withStageHeartbeat('design', () =>
-              callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true, undefined, getCallOptions('design', startedAt))
-            )
+            const designOptions = getCallOptions('design', startedAt)
+            let schemaResult: any
+            try {
+                schemaResult = await withStageHeartbeat('design', () =>
+                  callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true, undefined, { ...designOptions, useStream: true })
+                )
+            } catch (error) {
+                if (!shouldFallbackToNonStream(error, 'design')) {
+                    throw error
+                }
+                schemaResult = await withStageHeartbeat('design', () =>
+                  callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true, undefined, { ...designOptions, useStream: false, maxRetries: 0 })
+                )
+            }
              if (!schemaResult || !Array.isArray(schemaResult.tables) || !Array.isArray(schemaResult.relations)) {
                 throw new Error('表结构设计阶段返回数据格式错误')
             }
@@ -693,9 +720,21 @@ export async function POST(request: NextRequest) {
             // Stage 4: SQL Generation
             currentStage = 'sql_generation'
             await sendEvent('stage_start', { stage: 'sql_generation', message: '正在生成 SQL 语句...' })
-            const sqlGenerationResult = await withStageHeartbeat('sql_generation', () =>
-              callLLM(config, getSqlGenerationPrompt(config.databaseType, schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'sqlStatements', getCallOptions('sql_generation', startedAt))
-            )
+            const sqlOptions = getCallOptions('sql_generation', startedAt)
+            let sqlGenerationResult: any
+            try {
+                sqlGenerationResult = await withStageHeartbeat('sql_generation', () =>
+                  callLLM(config, getSqlGenerationPrompt(config.databaseType, schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'sqlStatements', { ...sqlOptions, useStream: true })
+                )
+            } catch (error) {
+                if (!shouldFallbackToNonStream(error, 'sql_generation')) {
+                    throw error
+                }
+                console.warn('[sql_generation] stream failed, fallback to non-stream:', error instanceof Error ? error.message : String(error))
+                sqlGenerationResult = await withStageHeartbeat('sql_generation', () =>
+                  callLLM(config, getSqlGenerationPrompt(config.databaseType, schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'sqlStatements', { ...sqlOptions, useStream: false, maxRetries: 0 })
+                )
+            }
             if (!sqlGenerationResult || typeof sqlGenerationResult.sqlStatements !== 'string') {
                  throw new Error('SQL生成阶段返回数据格式错误')
             }

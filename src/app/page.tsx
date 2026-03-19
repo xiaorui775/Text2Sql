@@ -77,7 +77,7 @@ export default function Home() {
 
   const STAGES = useMemo(() => {
     const stages = []
-    stages.push({ id: 'optimization', label: enableOptimization ? '需求优化' : '跳过需求优化' })
+    stages.push({ id: 'optimization', label: enableOptimization ? '需求提炼' : '跳过需求提炼' })
     stages.push(
       { id: 'analysis', label: '提取关键点' },
       { id: 'design', label: '表结构设计' },
@@ -452,7 +452,7 @@ export default function Home() {
                   <TabsList className="grid w-full grid-cols-5 mb-4 shrink-0">
                     <TabsTrigger value="optimization" className="flex items-center gap-1.5">
                       <Sparkles className="w-4 h-4" />
-                      需求详情
+                      需求提炼
                     </TabsTrigger>
                     <TabsTrigger value="keypoints" className="flex items-center gap-1.5" disabled={result.keyPoints.length === 0}>
                       <Lightbulb className="w-4 h-4" />
@@ -486,7 +486,7 @@ export default function Home() {
                           {isLoading ? (
                             <div className="flex flex-col items-center gap-2">
                                 <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
-                                <span>正在进行需求扩展与优化...</span>
+                                <span>正在提取关键信息并精炼需求...</span>
                             </div>
                           ) : "暂无优化数据"}
                         </div>
