@@ -80,13 +80,17 @@ COMMENT ON TABLE USERS IS '用户表';
 // Stage 1: Requirement Optimization
 function getRequirementOptimizationPrompt(): string {
   return `你是一个资深业务分析师。
-你的任务是对用户原始需求做“需求提炼”，目标只有三个：
+你的任务是对用户原始需求做"需求提炼"，目标只有四个：
+
 1) 提取关键信息：保留可用于数据库建模的业务实体、关系、约束、状态、流程与规则。
 2) 精炼需求表达：将口语化、重复或松散描述整理为清晰、紧凑、可执行的业务需求文本。
-3) 剔除无效干扰：删除与建模无关内容，如 UI 设计、页面样式、交互动效、营销文案、泛化口号、实现细节噪声等。
+3) 合并同源异构需求：当多个描述指向同一组核心数据/业务对象，仅因展示形式、入口渠道、交互方式或终端设备不同而产生差异时，必须抽象为一条通用需求，用"支持多端/多形式展示"等表述统一覆盖，避免按表现形式拆分成多条重复需求。
+   - 判断标准：若底层字段、业务规则、状态流转一致，仅前端呈现（如列表/卡片/图表）、访问入口（如APP/小程序/H5）、交互细节（如弹窗/抽屉/新页面）不同，则视为同一需求。
+   - 示例：「用户信息在APP端以卡片展示，在Web端以表格展示」→ 提炼为「用户信息支持多端自适应展示，核心字段与更新规则统一」。
+4) 剔除无效干扰：删除与建模无关内容，如 UI 设计细节、页面样式、交互动效、营销文案、泛化口号、技术实现噪声等。
 
 输出要求：
-- 只输出最终的“提炼后需求文本”。
+- 只输出最终的"提炼后需求文本"。
 - 使用中文，分段清晰，语义准确。
 - 不要输出 JSON，不要输出 markdown 代码块，不要解释你的处理过程。`
 }
@@ -97,55 +101,37 @@ function getAnalysisPrompt(): string {
 请分析用户的产品需求描述，提取出核心功能关键点。
 关键点必须是可映射为数据库建模的内容，禁止输出 UI、样式、页面交互等无关信息。
 
-【极度重要】：
-你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字！
-不要输出 markdown，不要输出代码块，不要输出任何 JSON 之外的字符。
+【极度重要 - JSON 格式要求】：
+1. 你必须且只能返回一个合法的 JSON 对象
+2. 不要输出任何解释性文字、markdown 标记或代码块
+3. 确保 JSON 格式完整，所有括号、引号、逗号都正确闭合
+4. 不要在 JSON 中使用中文标点符号（如：，、：等）
+5. 字符串值中如果包含引号，请使用转义符 \\"
 
-请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式，直接返回纯 JSON 字符串**：
-{
-  "keyPoints": ["关键点1", "关键点2", ...]
-}`
+返回格式示例：
+{"keyPoints":["关键点1","关键点2","关键点3"]}
+
+请严格按照上述格式返回结果。`
 }
 
 // Stage 3: Schema Design
 function getSchemaDesignPrompt(databaseType: string, keyPoints: string[]): string {
   return `你是一个资深的数据库架构师。
 基于以下业务关键点，设计合理的数据库表结构和关系。
+
 业务关键点：
 ${keyPoints.map(p => `- ${p}`).join('\n')}
 
-【极度重要】：
-你必须且只能返回一个合法的 JSON 对象！绝对不要输出其他解释性文字或直接输出 SQL！
-不要输出 markdown，不要输出代码块，不要输出任何 JSON 之外的字符。
+【极度重要 - JSON 格式要求】：
+1. 你必须且只能返回一个合法的 JSON 对象
+2. 不要输出任何解释性文字、markdown 标记或代码块
+3. 确保 JSON 格式完整，所有括号、引号、逗号都正确闭合
+4. 不要在 JSON 中使用中文标点符号（如：，、：等）
+5. 字符串值中如果包含引号，请使用转义符 \\"
+6. 布尔值使用 true/false，不要使用字符串
 
-请严格按照以下JSON格式返回结果，**不要包含任何 markdown 格式，直接返回纯 JSON 字符串**：
-{
-  "tables": [
-    {
-      "name": "表名",
-      "comment": "表注释说明",
-      "fields": [
-        {
-          "name": "字段名",
-          "type": "字段类型",
-          "isPrimary": false,
-          "isForeign": false,
-          "isNullable": true,
-          "comment": "字段注释"
-        }
-      ]
-    }
-  ],
-  "relations": [
-    {
-      "fromTable": "源表名",
-      "fromField": "源字段名",
-      "toTable": "目标表名",
-      "toField": "目标字段名",
-      "relationType": "1:N 或 1:1 或 N:M"
-    }
-  ]
-}
+返回格式示例：
+{"tables":[{"name":"users","comment":"用户表","fields":[{"name":"id","type":"Integer","isPrimary":true,"isForeign":false,"isNullable":false,"comment":"主键ID"}]}],"relations":[{"fromTable":"orders","fromField":"user_id","toTable":"users","toField":"id","relationType":"N:1"}]}
 
 通用设计原则：
 - 每个表必须有主键
@@ -154,7 +140,9 @@ ${keyPoints.map(p => `- ${p}`).join('\n')}
 - 添加必要的审计字段如 created_at、updated_at
 - 关系类型包括：1:1（一对一）、1:N（一对多）、N:M（多对多）
 - 对于多对多关系，需要创建中间关联表
-- 字段类型请使用通用的描述（如 String, Integer, DateTime），后续会转换为特定数据库语法`
+- 字段类型请使用通用的描述（如 String, Integer, DateTime），后续会转换为特定数据库语法
+
+请严格按照上述格式返回完整的 JSON 对象。`
 }
 
 // Stage 4: SQL Generation
@@ -177,15 +165,52 @@ ${dbSyntax}
 
 // Stage 5: Documentation Generation
 function getDocumentGenerationPrompt(tables: any[], relations: any[]): string {
-  return `你是一个资深的技术文档工程师。
-请根据以下表结构设计，编写一份标准的数据库设计文档。
+  const template = `# 数据库设计文档
 
-表结构设计：
-${JSON.stringify({ tables, relations }, null, 2)}
+## 1. 文档概览
+- 项目/模块：
+- 数据库类型：
+- 文档范围：
 
-【极度重要】：
-请直接返回完整的数据库设计文档（Markdown格式，使用 # 等标题层级，对于数据字典和表关系请使用标准的 Markdown 表格形式展示），不要任何解释性文字！不要返回 JSON 格式！
+## 2. 设计原则
+- 命名规范：
+- 主外键策略：
+- 索引策略：
+- 审计字段策略：
+
+## 3. 实体清单
+| 表名 | 中文名/注释 | 说明 |
+|---|---|---|
+|  |  |  |
+
+## 4. 数据字典
+### 4.1 表：<表名>
+- 表作用：<一句话说明该表承载的业务对象与用途>
+
+| 字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明 |
+|---|---|---|---|---|---|---|
+|  |  |  |  |  |  |  |
+
+## 5. 表关系说明
+| 源表 | 源字段 | 目标表 | 目标字段 | 关系类型 | 说明 |
+|---|---|---|---|---|---|
+|  |  |  |  |  |  |
 `
+
+  return `你是一个数据库文档工程师，请基于用户消息中提供的结构生成“简洁版”设计文档。
+
+必须严格使用以下模板结构与表头：
+${template}
+
+生成规则：
+1) 必须保留全部一级章节标题，不允许改名。
+2) “实体清单”“数据字典”“表关系说明”必须是 Markdown 表格，表头不可改。
+3) “实体清单”的“说明”列必须写该表业务作用，禁止留空或只重复表名。
+4) 每个“### 4.x 表：...”后必须有一行“表作用：...”，控制在一句话。
+5) 信息不足可写“暂无”，但不得省略章节。
+6) 全文保持简洁：每个说明优先一句话，避免冗长描述。
+
+只返回 Markdown 正文，不要解释，不要代码块。`
 }
 
 interface LLMConfig {
@@ -207,12 +232,12 @@ interface CallLLMOptions {
   useStream?: boolean
 }
 
-const ANALYZE_TOTAL_BUDGET_MS = 270000
+const ANALYZE_TOTAL_BUDGET_MS = 300000
 const HEARTBEAT_INTERVAL_MS = 12000
 const STAGE_TIMEOUT_MS: Record<AnalyzeStage, number> = {
   optimization: 50000,
   analysis: 40000,
-  design: 70000,
+  design: 90000,
   sql_generation: 60000,
   doc_generation: 50000
 }
@@ -238,6 +263,17 @@ function getCallOptions(stageName: AnalyzeStage, startTime: number): CallLLMOpti
   }
 }
 
+function getDocCallOptions(startTime: number): CallLLMOptions | null {
+  const remaining = getRemainingBudgetMs(startTime)
+  if (remaining <= 12000) return null
+  const timeoutMs = Math.max(8000, Math.min(25000, remaining - 3000))
+  return {
+    timeoutMs,
+    maxRetries: 0,
+    stageName: 'doc_generation'
+  }
+}
+
 function shouldFallbackToNonStream(error: unknown, stageName: AnalyzeStage): boolean {
   if (stageName !== 'design' && stageName !== 'sql_generation') return false
   if (!(error instanceof Error)) return false
@@ -247,6 +283,168 @@ function shouldFallbackToNonStream(error: unknown, stageName: AnalyzeStage): boo
     || message.includes('llm api returned invalid json')
     || message.includes('unexpected end')
     || (stageName === 'sql_generation' && message.includes('sql结果校验失败'))
+}
+
+function getDocumentRepairPrompt(rawDocument: string): string {
+  return `你是一个文档格式修复助手。请将给定文档重排为标准模板并保留有效信息。
+
+必须保留并按顺序输出以下一级标题：
+# 数据库设计文档
+## 1. 文档概览
+## 2. 设计原则
+## 3. 实体清单
+## 4. 数据字典
+## 5. 表关系说明
+
+必须使用以下表头（不得改名）：
+- 实体清单：表名 | 中文名/注释 | 说明
+- 数据字典：字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明
+- 表关系说明：源表 | 源字段 | 目标表 | 目标字段 | 关系类型 | 说明
+
+每个“### 4.x 表：...”小节必须包含“表作用：...”一句话说明该表的业务用途。
+
+原始文档：
+${rawDocument}
+
+只返回修复后的 Markdown 正文，不要任何解释。`
+}
+
+function hasMarkdownTable(content: string, requiredHeaders: string[]): boolean {
+  const normalized = content.replace(/\r\n/g, '\n')
+  return requiredHeaders.every(header => normalized.includes(header))
+}
+
+function isDocumentStructured(content: string): boolean {
+  const normalized = content.replace(/\r\n/g, '\n')
+  const requiredSections = [
+    '# 数据库设计文档',
+    '## 1. 文档概览',
+    '## 2. 设计原则',
+    '## 3. 实体清单',
+    '## 4. 数据字典',
+    '## 5. 表关系说明'
+  ]
+  const hasSections = requiredSections.every(section => normalized.includes(section))
+  const hasEntityTable = hasMarkdownTable(normalized, ['| 表名 | 中文名/注释 | 说明 |'])
+  const hasDictionaryTable = hasMarkdownTable(normalized, ['| 字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明 |'])
+  const hasRelationTable = hasMarkdownTable(normalized, ['| 源表 | 源字段 | 目标表 | 目标字段 | 关系类型 | 说明 |'])
+  return hasSections && hasEntityTable && hasDictionaryTable && hasRelationTable
+}
+
+function hasAllTablesCovered(content: string, tables: any[]): boolean {
+  const normalized = content.replace(/\r\n/g, '\n')
+  const tableNames = (Array.isArray(tables) ? tables : [])
+    .map((table: any) => String(table?.name || '').trim())
+    .filter(Boolean)
+  if (tableNames.length === 0) return true
+  return tableNames.every((tableName) =>
+    normalized.includes(`表：${tableName}`) || normalized.includes(`| ${tableName} |`)
+  )
+}
+
+function toFlag(value: boolean): string {
+  return value ? '是' : '否'
+}
+
+function deriveTablePurpose(table: any): string {
+  const tableName = String(table?.name || '').trim()
+  const tableComment = String(table?.comment || '').trim()
+  if (tableComment) {
+    return `用于存储${tableComment}相关数据，支撑对应业务流程。`
+  }
+  if (tableName) {
+    return `用于存储${tableName}相关数据，支撑核心业务处理。`
+  }
+  return '用于承载该业务实体的核心数据。'
+}
+
+function buildCompactDocInput(tables: any[], relations: any[]): string {
+  let compactTables = (Array.isArray(tables) ? tables : []).slice(0, 80).map((table: any) => ({
+    name: table?.name || '',
+    comment: table?.comment || '',
+    fields: (Array.isArray(table?.fields) ? table.fields : []).slice(0, 80).map((field: any) => ({
+      name: field?.name || '',
+      type: field?.type || '',
+      isPrimary: !!field?.isPrimary,
+      isForeign: !!field?.isForeign,
+      isNullable: !!field?.isNullable,
+      comment: field?.comment || ''
+    }))
+  }))
+
+  let compactRelations = (Array.isArray(relations) ? relations : []).slice(0, 200).map((relation: any) => ({
+    fromTable: relation?.fromTable || '',
+    fromField: relation?.fromField || '',
+    toTable: relation?.toTable || '',
+    toField: relation?.toField || '',
+    relationType: relation?.relationType || ''
+  }))
+
+  let payload = JSON.stringify({ tables: compactTables, relations: compactRelations })
+  while (payload.length > 22000 && (compactTables.length > 10 || compactRelations.length > 20)) {
+    if (compactTables.length >= compactRelations.length / 2 && compactTables.length > 10) {
+      compactTables = compactTables.slice(0, Math.max(10, Math.floor(compactTables.length * 0.85)))
+    } else if (compactRelations.length > 20) {
+      compactRelations = compactRelations.slice(0, Math.max(20, Math.floor(compactRelations.length * 0.85)))
+    } else {
+      break
+    }
+    payload = JSON.stringify({ tables: compactTables, relations: compactRelations })
+  }
+  if (payload.length <= 22000) return payload
+  return JSON.stringify({
+    tables: compactTables.slice(0, 10),
+    relations: compactRelations.slice(0, 20)
+  })
+}
+
+function buildFallbackDesignDocument(databaseType: string, tables: any[], relations: any[]): string {
+  const entityRows = tables.map((table) =>
+    `| ${table.name || '-'} | ${table.comment || '-'} | ${deriveTablePurpose(table)} |`
+  ).join('\n') || '| - | - | 用于承载该业务实体的核心数据。 |'
+  const dictionarySections = tables.map((table: any, tableIndex: number) => {
+    const header = `### 4.${tableIndex + 1} 表：${table.name || '-'}`
+    const rows = (Array.isArray(table.fields) ? table.fields : []).map((field: any) =>
+      `| ${field.name || '-'} | ${field.comment || '-'} | ${field.type || '-'} | ${toFlag(!!field.isPrimary)} | ${toFlag(!!field.isForeign)} | ${toFlag(!!field.isNullable)} | ${field.comment || '-'} |`
+    ).join('\n') || '| - | - | - | - | - | - | - |'
+    return `${header}
+- 表作用：${deriveTablePurpose(table)}
+
+| 字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明 |
+|---|---|---|---|---|---|---|
+${rows}`
+  }).join('\n\n')
+
+  const relationRows = relations.map((relation: any) =>
+    `| ${relation.fromTable || '-'} | ${relation.fromField || '-'} | ${relation.toTable || '-'} | ${relation.toField || '-'} | ${relation.relationType || '-'} | - |`
+  ).join('\n') || '| - | - | - | - | - | - |'
+
+  return `# 数据库设计文档
+
+## 1. 文档概览
+- 项目/模块：暂无
+- 数据库类型：${databaseType}
+- 文档范围：根据当前表结构自动生成
+
+## 2. 设计原则
+- 命名规范：表名与字段名采用可读且语义明确的命名方式。
+- 主外键策略：每张表应有主键，关联关系通过外键表达。
+- 索引策略：为高频查询字段与关联字段建立索引。
+- 审计字段策略：建议统一包含 created_at、updated_at 等审计字段。
+
+## 3. 实体清单
+| 表名 | 中文名/注释 | 说明 |
+|---|---|---|
+${entityRows}
+
+## 4. 数据字典
+${dictionarySections}
+
+## 5. 表关系说明
+| 源表 | 源字段 | 目标表 | 目标字段 | 关系类型 | 说明 |
+|---|---|---|---|---|---|
+${relationRows}
+`
 }
 
 function extractContentText(content: unknown): string {
@@ -274,6 +472,7 @@ function extractBalancedJsonObject(input: string): string | null {
   let depth = 0
   let inString = false
   let escaped = false
+  const stack: string[] = []
 
   for (let i = startIndex; i < text.length; i++) {
     const char = text[i]
@@ -284,29 +483,87 @@ function extractBalancedJsonObject(input: string): string | null {
         escaped = true
       } else if (char === '"') {
         inString = false
+        stack.pop()
       }
       continue
     }
 
     if (char === '"') {
       inString = true
+      stack.push('"')
       continue
     }
 
-    if (char === '{') depth++
-    if (char === '}') {
+    if (char === '{') {
+      depth++
+      stack.push('}')
+    } else if (char === '[') {
+      stack.push(']')
+    } else if (char === '}') {
       depth--
+      if (stack[stack.length - 1] === '}') stack.pop()
       if (depth === 0) {
         return text.slice(startIndex, i + 1)
       }
+    } else if (char === ']') {
+      if (stack[stack.length - 1] === ']') stack.pop()
     }
+  }
+
+  // 如果 JSON 不完整，尝试修复
+  if (depth > 0) {
+    let fixed = text.slice(startIndex)
+    // 移除末尾的逗号
+    fixed = fixed.replace(/,\s*$/, '')
+    // 补全缺失的括号
+    while (stack.length > 0) {
+      const closer = stack.pop()
+      if (closer) fixed += closer
+    }
+    return fixed
   }
 
   return null
 }
 
+// 新增：更激进的 JSON 修复函数
+function aggressiveJsonFix(input: string): string | null {
+  let text = input.trim()
+  
+  // 移除 markdown 代码块
+  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')
+  
+  // 提取 JSON 对象
+  const extracted = extractBalancedJsonObject(text)
+  if (!extracted) return null
+  
+  let fixed = extracted
+  
+  // 修复常见的 JSON 语法错误
+  // 1. 移除对象/数组末尾的逗号
+  fixed = fixed.replace(/,(\s*[}\]])/g, '$1')
+  
+  // 2. 修复未闭合的字符串（在逗号或括号前）
+  fixed = fixed.replace(/("[^"]*?)(\n|$)/g, (match, p1) => {
+    if (!p1.endsWith('"')) return p1 + '"'
+    return match
+  })
+  
+  // 3. 移除注释
+  fixed = fixed.replace(/\/\*[\s\S]*?\*\//g, '')
+  fixed = fixed.replace(/\/\/.*/g, '')
+  
+  // 4. 修复中文标点
+  fixed = fixed.replace(/，/g, ',')
+  fixed = fixed.replace(/：/g, ':')
+  
+  return fixed
+}
+
 function parseStructuredJsonContent(raw: string): any {
   let cleanedContent = raw.trim()
+  
+  // 移除 markdown 代码块
   const jsonBlockMatch = cleanedContent.match(/```json\s*([\s\S]*?)\s*```/)
   if (jsonBlockMatch) {
     cleanedContent = jsonBlockMatch[1]
@@ -317,20 +574,25 @@ function parseStructuredJsonContent(raw: string): any {
     }
   }
 
-  const balancedJson = extractBalancedJsonObject(cleanedContent)
-  if (balancedJson) {
-    cleanedContent = balancedJson
-  }
-
+  // 尝试多种修复策略
   const candidates = [
     cleanedContent,
-    cleanedContent.replace(/,\s*([}\]])/g, '$1')
-  ]
+    cleanedContent.replace(/,\s*([}\]])/g, '$1'), // 移除末尾逗号
+    aggressiveJsonFix(cleanedContent) // 激进修复
+  ].filter(Boolean) as string[]
 
+  // 尝试解析每个候选
   for (const candidate of candidates) {
     try {
-      return JSON.parse(candidate)
-    } catch {}
+      const parsed = JSON.parse(candidate)
+      // 验证解析结果是否为对象
+      if (parsed && typeof parsed === 'object') {
+        return parsed
+      }
+    } catch (e) {
+      // 继续尝试下一个候选
+      continue
+    }
   }
 
   throw new Error('Failed to parse LLM response as JSON')
@@ -387,34 +649,37 @@ async function extractContentFromStreamResponse(response: Response): Promise<str
         .map(line => line.slice(5).trimStart())
 
       if (dataLines.length === 0) continue
-      const payload = dataLines.join('\n').trim()
-      if (!payload) continue
-      if (payload === '[DONE]') {
-        return content.trim()
-      }
 
-      let chunk: any
-      try {
-        chunk = JSON.parse(payload)
-      } catch {
-        continue
-      }
+      for (const payload of dataLines) {
+        if (!payload) continue
+        if (payload === '[DONE]') {
+          return content.trim()
+        }
 
-      if (chunk?.error?.message) {
-        throw new Error(chunk.error.message)
-      }
+        let chunk: any
+        try {
+          chunk = JSON.parse(payload)
+        } catch (e) {
+          console.warn('Failed to parse stream payload:', payload)
+          continue
+        }
 
-      const deltaText = extractContentText(chunk?.choices?.[0]?.delta?.content)
-      const messageText = extractContentText(chunk?.choices?.[0]?.message?.content)
+        if (chunk?.error?.message) {
+          throw new Error(chunk.error.message)
+        }
 
-      if (deltaText) {
-        content += deltaText
-      } else if (messageText) {
-        const normalizedMessageText = messageText.trim()
-        if (normalizedMessageText.startsWith(content.trim())) {
-          content = normalizedMessageText
-        } else {
-          content += messageText
+        const deltaText = extractContentText(chunk?.choices?.[0]?.delta?.content)
+        const messageText = extractContentText(chunk?.choices?.[0]?.message?.content)
+
+        if (deltaText) {
+          content += deltaText
+        } else if (messageText) {
+          const normalizedMessageText = messageText.trim()
+          if (normalizedMessageText.startsWith(content.trim())) {
+            content = normalizedMessageText
+          } else {
+            content += messageText
+          }
         }
       }
     }
@@ -497,7 +762,36 @@ async function callLLM(
       const normalizedContent = content.trim()
       const parseSample = normalizedContent.slice(0, 300).replace(/\s+/g, ' ')
       console.error(`[${options.stageName}] JSON parse failed sample:`, parseSample)
-      // 容错处理：如果模型没有返回 JSON 而是直接返回了 SQL 代码（通常包含 CREATE TABLE 或 CREATE DATABASE）
+      
+      // 新增：如果是第一次失败，尝试让 LLM 自己修复 JSON
+      if (retryCount === 0 && expectJson) {
+        console.log(`[${options.stageName}] Attempting JSON self-repair...`)
+        const repairSource = normalizedContent.length > 16000 ? normalizedContent.slice(0, 16000) : normalizedContent
+        const repairPrompt = `以下是一个格式错误的 JSON，请修复它并返回正确的 JSON 格式。只返回修复后的 JSON，不要任何解释。
+
+错误的 JSON：
+${repairSource}
+
+请返回修复后的完整 JSON 对象。`
+        
+        try {
+          const repaired = await callLLM(
+            config,
+            '你是一个 JSON 格式修复专家。',
+            repairPrompt,
+            true,
+            undefined,
+            { ...options, maxRetries: 0 },
+            1 // 标记为重试，避免无限循环
+          )
+          return repaired
+        } catch (repairError) {
+          console.error(`[${options.stageName}] JSON self-repair failed:`, repairError)
+          // 继续执行原有的容错逻辑
+        }
+      }
+      
+      // 容错处理：如果模型没有返回 JSON 而是直接返回了 SQL 代码
       if (!normalizedContent.includes('{') && (normalizedContent.toUpperCase().includes('CREATE TABLE') || normalizedContent.toUpperCase().includes('CREATE DATABASE'))) {
         return {
           sqlStatements: content.replace(/```sql/gi, '').replace(/```/g, '').replace(/^sql\n/i, '').trim()
@@ -712,8 +1006,17 @@ export async function POST(request: NextRequest) {
                   callLLM(config, getSchemaDesignPrompt(config.databaseType, analysisResult.keyPoints), JSON.stringify(analysisResult), true, undefined, { ...designOptions, useStream: false, maxRetries: 0 })
                 )
             }
-             if (!schemaResult || !Array.isArray(schemaResult.tables) || !Array.isArray(schemaResult.relations)) {
+            if (!schemaResult || typeof schemaResult !== 'object') {
                 throw new Error('表结构设计阶段返回数据格式错误')
+            }
+            if (!Array.isArray(schemaResult.tables)) {
+                schemaResult.tables = []
+            }
+            if (!Array.isArray(schemaResult.relations)) {
+                schemaResult.relations = []
+            }
+            if (schemaResult.tables.length === 0) {
+                throw new Error('表结构设计阶段返回数据格式错误: 缺少表数据')
             }
             await sendEvent('stage_done', { stage: 'design', data: schemaResult })
 
@@ -747,17 +1050,48 @@ export async function POST(request: NextRequest) {
             if (enableDocGeneration) {
                 await sendEvent('stage_start', { stage: 'doc_generation', message: '正在生成设计文档...' })
                 try {
+                    const docOptions = getDocCallOptions(startedAt)
+                    if (!docOptions) {
+                        const message = '剩余预算不足，已跳过大模型文档生成并返回兜底文档'
+                        docGenerationResult = {
+                            designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n以下为模板化兜底文档：\n\n${buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)}`
+                        }
+                        await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
+                    } else {
+                    const compactDocInput = buildCompactDocInput(schemaResult.tables, schemaResult.relations)
                     docGenerationResult = await withStageHeartbeat('doc_generation', () =>
-                      callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), JSON.stringify(schemaResult), false, 'designDocument', getCallOptions('doc_generation', startedAt))
+                      callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), compactDocInput, false, 'designDocument', docOptions)
                     )
                     if (!docGenerationResult || typeof docGenerationResult.designDocument !== 'string') {
                         throw new Error('文档生成阶段返回数据格式错误')
                     }
+                    const docIsStructured = isDocumentStructured(docGenerationResult.designDocument)
+                    const docHasAllTables = hasAllTablesCovered(docGenerationResult.designDocument, schemaResult.tables)
+                    if (!docIsStructured || !docHasAllTables) {
+                        const repairOptions = getDocCallOptions(startedAt)
+                        if (repairOptions && getRemainingBudgetMs(startedAt) > 18000) {
+                            const repaired = await withStageHeartbeat('doc_generation', () =>
+                              callLLM(config, getDocumentRepairPrompt(docGenerationResult.designDocument), '', false, 'designDocument', repairOptions)
+                            )
+                            if (repaired && typeof repaired.designDocument === 'string' && isDocumentStructured(repaired.designDocument) && hasAllTablesCovered(repaired.designDocument, schemaResult.tables)) {
+                                docGenerationResult = repaired
+                            } else {
+                                docGenerationResult = {
+                                    designDocument: buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)
+                                }
+                            }
+                        } else {
+                            docGenerationResult = {
+                                designDocument: buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)
+                            }
+                        }
+                    }
                     await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
+                    }
                 } catch (error) {
                     const message = error instanceof Error ? error.message : '文档生成超时'
                     docGenerationResult = {
-                        designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n当前已返回可用的表结构、ER 图和 SQL 结果。`
+                        designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n以下为模板化兜底文档：\n\n${buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)}`
                     }
                     await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
                 }

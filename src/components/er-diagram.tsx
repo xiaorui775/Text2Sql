@@ -51,6 +51,7 @@ interface RelationEndpoints {
   fromY: number
   toX: number
   toY: number
+  isSelf?: boolean
 }
 
 interface RelationCurve {
@@ -173,6 +174,17 @@ function getRelationEndpoints(
   const toFieldIndex = tables.find(t => t.name === relation.toTable)?.fields.findIndex(f => f.name === relation.toField) ?? -1
   if (fromFieldIndex === -1 || toFieldIndex === -1) return null
 
+  const isSelf = relation.fromTable === relation.toTable
+  if (isSelf) {
+    return {
+      fromX: fromPos.x + fromPos.width,
+      fromY: fromPos.y + HEADER_HEIGHT + fromFieldIndex * ROW_HEIGHT + FIELD_CENTER_OFFSET,
+      toX: toPos.x + toPos.width,
+      toY: toPos.y + HEADER_HEIGHT + toFieldIndex * ROW_HEIGHT + FIELD_CENTER_OFFSET,
+      isSelf: true
+    }
+  }
+
   const isFromRight = fromPos.x > toPos.x
   const isFromBelow = fromPos.y > toPos.y
 
@@ -193,7 +205,7 @@ function getRelationEndpoints(
     toY = toPos.y + HEADER_HEIGHT + toFieldIndex * ROW_HEIGHT + FIELD_CENTER_OFFSET
   }
 
-  return { fromX, fromY, toX, toY }
+  return { fromX, fromY, toX, toY, isSelf: false }
 }
 
 function intersectsTable(
@@ -219,6 +231,22 @@ function intersectsTable(
 }
 
 function getRelationCurve(endpoints: RelationEndpoints): RelationCurve {
+  if (endpoints.isSelf) {
+    const loopWidth = 60
+    return {
+      fromX: endpoints.fromX,
+      fromY: endpoints.fromY,
+      toX: endpoints.toX,
+      toY: endpoints.toY,
+      midX: endpoints.fromX + loopWidth,
+      midY: (endpoints.fromY + endpoints.toY) / 2,
+      control1X: endpoints.fromX + loopWidth,
+      control1Y: endpoints.fromY,
+      control2X: endpoints.toX + loopWidth,
+      control2Y: endpoints.toY
+    }
+  }
+
   const dx = endpoints.toX - endpoints.fromX
   const dy = endpoints.toY - endpoints.fromY
   const isVertical = Math.abs(dy) > Math.abs(dx)
@@ -296,8 +324,8 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
       const maxX = Math.max(...Object.values(positions).map(p => p.x + p.width))
       const maxY = Math.max(...Object.values(positions).map(p => p.y + p.height))
       return {
-        width: Math.max(800, maxX + 60),
-        height: Math.max(500, maxY + 60)
+        width: Math.max(800, maxX + 120),
+        height: Math.max(500, maxY + 100)
       }
     }
     return { width: 800, height: 500 }
