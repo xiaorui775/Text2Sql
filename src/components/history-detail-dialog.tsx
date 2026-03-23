@@ -10,11 +10,13 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { format } from "date-fns"
-import { Clock, Database, Brain, AlertCircle } from "lucide-react"
+import { Clock, Database, Brain, AlertCircle, Copy, Check } from "lucide-react"
 import ERDiagram from "./er-diagram"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useMemo } from "react"
+import { useMemo, useState, useCallback } from "react"
 import DesignDocMarkdown from "./design-doc-markdown"
+import { Button } from "@/components/ui/button"
+import { toast } from "sonner"
 
 interface HistoryDetailDialogProps {
   open: boolean
@@ -33,6 +35,7 @@ interface HistoryDetailDialogProps {
 }
 
 export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailDialogProps) {
+  const [copiedSql, setCopiedSql] = useState(false)
   const parsedResult = useMemo(() => {
     if (!item?.result) return null
     try {
@@ -42,6 +45,15 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
       return null
     }
   }, [item])
+
+  const copySql = useCallback(async () => {
+    const sql = parsedResult?.sqlStatements
+    if (!sql) return
+    await navigator.clipboard.writeText(sql)
+    setCopiedSql(true)
+    toast.success('SQL已复制到剪贴板')
+    setTimeout(() => setCopiedSql(false), 2000)
+  }, [parsedResult?.sqlStatements])
 
   if (!item) return null
 
@@ -107,11 +119,24 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
               </TabsContent>
 
               <TabsContent value="sql" className="h-full m-0">
-                <ScrollArea className="h-full w-full rounded-md border p-4 bg-slate-950 text-slate-50">
-                  <pre className="font-mono text-sm">
-                    {parsedResult?.sqlStatements || item.errorMessage || '无 SQL 数据'}
-                  </pre>
-                </ScrollArea>
+                <div className="h-full rounded-md border bg-slate-950 text-slate-50 relative">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={copySql}
+                    disabled={!parsedResult?.sqlStatements}
+                    className="absolute top-3 right-3 z-10 bg-slate-800 text-slate-100 border-slate-700 hover:bg-slate-700"
+                  >
+                    {copiedSql ? <Check className="w-4 h-4 mr-1" /> : <Copy className="w-4 h-4 mr-1" />}
+                    {copiedSql ? '已复制' : ''}
+                  </Button>
+                  <ScrollArea className="h-full w-full p-4">
+                    <pre className="font-mono text-sm pt-10">
+                      {parsedResult?.sqlStatements || item.errorMessage || '无 SQL 数据'}
+                    </pre>
+                  </ScrollArea>
+                </div>
               </TabsContent>
 
               <TabsContent value="doc" className="h-full m-0">
