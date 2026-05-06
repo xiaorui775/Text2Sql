@@ -70,13 +70,14 @@ export default function Home() {
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
   const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
   const [currentStage, setCurrentStage] = useState<string>('')
-  
+  const [stageProgress, setStageProgress] = useState<Record<string, { completed: number; total: number }>>({})
+
   // Settings for analysis
   const [enableOptimization, setEnableOptimization] = useState(true)
   const [enableDocGeneration, setEnableDocGeneration] = useState(true)
 
   const STAGES = useMemo(() => {
-    const stages = []
+    const stages: { id: string; label: string }[] = []
     stages.push({ id: 'optimization', label: enableOptimization ? '需求提炼' : '跳过需求提炼' })
     stages.push(
       { id: 'analysis', label: '提取关键点' },
@@ -114,6 +115,7 @@ export default function Home() {
     setIsLoading(true)
     setResult(null)
     setCurrentStage('')
+    setStageProgress({})
     
     // Initialize empty result for progressive rendering
     const emptyResult: AnalysisResult = {
@@ -190,6 +192,14 @@ export default function Home() {
                         if (event === 'stage_start') {
                             setCurrentStage(data.stage)
                         } else if (event === 'heartbeat') {
+                            continue
+                        } else if (event === 'stage_progress') {
+                            if (data.stage && data.progress) {
+                                setStageProgress(prev => ({
+                                    ...prev,
+                                    [data.stage]: { completed: data.progress.completed, total: data.progress.total }
+                                }))
+                            }
                             continue
                         } else if (event === 'stage_done') {
                             if (data.stage === 'optimization') {
@@ -302,6 +312,11 @@ export default function Home() {
                 </div>
                 <span className={`text-xs font-medium ${isCurrent ? 'text-blue-600 dark:text-blue-400' : isCompleted ? 'text-emerald-600 dark:text-emerald-500' : 'text-slate-500 dark:text-slate-400'}`}>
                   {stage.label}
+                  {stageProgress[stage.id] && stageProgress[stage.id].total > 1 && (
+                    <span className="ml-1 opacity-70">
+                      ({stageProgress[stage.id].completed + 1}/{stageProgress[stage.id].total})
+                    </span>
+                  )}
                 </span>
                 
                 {/* 连接线 */}
