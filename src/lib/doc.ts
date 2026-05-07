@@ -176,3 +176,169 @@ ${tables.some(t => (t.fields || []).some(f => f.comment?.includes('密码') || f
 - ${databaseType.toUpperCase()} 环境下建议定期备份并验证恢复流程
 `
 }
+
+// === 分段文档生成工具（大型系统 >8 表时使用） ===
+
+const CHUNK_DOC_BATCH_SIZE = 8
+
+export function shouldChunkDoc(tables: TableSchema[]): boolean {
+  return tables.length > CHUNK_DOC_BATCH_SIZE
+}
+
+export function splitDocTableBatches(tables: TableSchema[], batchSize = CHUNK_DOC_BATCH_SIZE): TableSchema[][] {
+  if (tables.length <= batchSize) return [tables]
+  const batches: TableSchema[][] = []
+  for (let i = 0; i < tables.length; i += batchSize) {
+    batches.push(tables.slice(i, i + batchSize))
+  }
+  return batches
+}
+
+/** Part A 输入：仅表名+注释+需求数，不传字段详情，payload 极小 */
+export function buildOverviewDocInput(
+  tables: TableSchema[],
+  relations: TableRelation[],
+  requirement?: string,
+  optimizedRequirement?: string
+): string {
+  const tableSummaries = tables.map(t => ({
+    name: t.name,
+    comment: t.comment,
+    fieldCount: Array.isArray(t.fields) ? t.fields.length : 0
+  }))
+  const relationSummaries = relations.map(r => ({
+    fromTable: r.fromTable,
+    fromField: r.fromField,
+    toTable: r.toTable,
+    toField: r.toField,
+    relationType: r.relationType
+  }))
+
+  const payload: Record<string, any> = {
+    totalTables: tables.length,
+    totalRelations: relations.length,
+    tables: tableSummaries,
+    relations: relationSummaries
+  }
+  if (requirement) {
+    payload.requirement = requirement.length > 3000 ? requirement.slice(0, 3000) + '...' : requirement
+  }
+  if (optimizedRequirement) {
+    payload.optimizedRequirement = optimizedRequirement.length > 3000 ? optimizedRequirement.slice(0, 3000) + '...' : optimizedRequirement
+  }
+  return JSON.stringify(payload)
+}
+
+/** Part B 输入：一批表的完整字段信息 */
+export function buildDictionaryDocInput(batchTables: TableSchema[]): string {
+  return JSON.stringify(batchTables.map(table => ({
+    name: table.name,
+    comment: table.comment,
+    fields: (Array.isArray(table.fields) ? table.fields : []).map(field => ({
+      name: field.name,
+      type: field.type,
+      isPrimary: !!field.isPrimary,
+      isForeign: !!field.isForeign,
+      isNullable: !!field.isNullable,
+      comment: field.comment
+    }))
+  })))
+}
+
+/** Part C 输入：关系列表 + 表名清单 */
+export function buildRelationsDocInput(relations: TableRelation[], tableNames: string[]): string {
+  return JSON.stringify({
+    totalTables: tableNames.length,
+    tableNames,
+    relations: relations.map(r => ({
+      fromTable: r.fromTable,
+      fromField: r.fromField,
+      toTable: r.toTable,
+      toField: r.toField,
+      relationType: r.relationType
+    }))
+  })
+}
+
+/** 组装分段文档，重新编号 ### 3.x，补齐缺失表 */
+export function assembleChunkedDoc(
+  overview: string,
+  dictionaryParts: string[],
+  relations: string,
+  allTables: TableSchema[]
+): string {
+  // 拼接数据字典，重新编号 ### 3.x
+  const rawDictionary = dictionaryParts.join('\n\n')
+  let tableIndex = 0
+  const renumberedDictionary = rawDictionary.replace(
+    /###\s+\d+\.\d+\s+表：/g,
+    () => `### 3.${++tableIndex} 表：`
+  )
+  // 兜底：如果 LLM 没带编号，直接用 ### 表： 的也尝试重新编号
+  const finalDictionary = renumberedDictionary.replace(
+    /###\s+表：/g,
+    () => `### 3.${++tableIndex} 表：`
+  )
+
+  // 校验覆盖：检查每个表名是否出现在数据字典中
+  const missingTables: TableSchema[] = []
+  for (const table of allTables) {
+    if (!finalDictionary.includes(`表：${table.name}`)) {
+      missingTables.push(table)
+    }
+  }
+
+  // 补齐缺失表
+  const missingDictSections = missingTables.map(t => {
+    const rows = (Array.isArray(t.fields) ? t.fields : []).map(field =>
+      `| ${field.name || '-'} | ${field.comment || '-'} | ${field.type || '-'} | ${toFlag(!!field.isPrimary)} | ${toFlag(!!field.isForeign)} | ${toFlag(!!field.isNullable)} | ${field.comment || '-'} |`
+    ).join('\n') || '| - | - | - | - | - | - | - |'
+    return `### 3.${++tableIndex} 表：${t.name}
+- 表作用：${deriveTablePurpose(t)}
+
+| 字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明 |
+|---|---|---|---|---|---|---|
+${rows}`
+  }).join('\n\n')
+
+  const fullDictionary = finalDictionary + (missingDictSections ? '\n\n' + missingDictSections : '')
+
+  // 清理 overview 末尾多余的换行，避免拼接时空行过多
+  const cleanOverview = overview.trimEnd()
+  const cleanRelations = relations.trim()
+
+  return `${cleanOverview}
+
+## 3. 数据字典
+${fullDictionary}
+
+${cleanRelations}`
+}
+
+/** Part B 单批模板兜底（预算耗尽/调用失败时） */
+export function buildDictionaryTemplate(tables: TableSchema[]): string {
+  return tables.map(table => {
+    const rows = (Array.isArray(table.fields) ? table.fields : []).map(field =>
+      `| ${field.name || '-'} | ${field.comment || '-'} | ${field.type || '-'} | ${toFlag(!!field.isPrimary)} | ${toFlag(!!field.isForeign)} | ${toFlag(!!field.isNullable)} | ${field.comment || '-'} |`
+    ).join('\n') || '| - | - | - | - | - | - | - |'
+    return `### 表：${table.name || '-'}
+- 表作用：${deriveTablePurpose(table)}
+
+| 字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明 |
+|---|---|---|---|---|---|---|
+${rows}`
+  }).join('\n\n')
+}
+
+/** Part C 模板兜底 */
+export function buildRelationsTemplate(relations: TableRelation[]): string {
+  const relationRows = relations.map(r =>
+    `| ${r.fromTable || '-'} | ${r.fromField || '-'} | ${r.toTable || '-'} | ${r.toField || '-'} | ${r.relationType || '-'} | - |`
+  ).join('\n') || '| - | - | - | - | - | - |'
+
+  return `## 4. 表关系说明
+| 源表 | 源字段 | 目标表 | 目标字段 | 关系类型 | 说明 |
+|---|---|---|---|---|---|
+${relationRows}`
+}
+

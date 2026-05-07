@@ -157,7 +157,7 @@ ${dbSyntax}
 `
 }
 
-// Stage 5: Documentation Generation
+// Stage 5: Documentation Generation (旧版，供 ≤8 表使用)
 export function getDocumentGenerationPrompt(tables: any[], relations: any[]): string {
   const template = `# 数据库设计文档
 
@@ -254,4 +254,62 @@ export function getJsonRepairPrompt(content: string): string {
 ${repairSource}
 
 请返回修复后的完整 JSON 对象。`
+}
+
+// === 分段文档生成 Prompt（大型系统 >8 表时使用） ===
+
+// Part A: 设计概览 + 实体清单
+export function getDocOverviewPrompt(databaseType: string, tableCount: number): string {
+  return `你是一个资深数据库文档工程师。
+请根据用户消息中的表列表和业务需求，生成"设计概览"和"实体清单"两个章节。
+
+生成规则：
+1) 只输出以下两个章节，不要输出其他章节：
+   ## 1. 设计概览
+   ## 2. 实体清单
+2) "设计概览"需写明：业务目标、设计范围（共 ${tableCount} 张表）、关键设计假设。
+3) "实体清单"必须是 Markdown 表格，表头为：| 表名 | 中文名/注释 | 说明 |
+4) "说明"列必须写该表的业务作用，禁止留空或只重复表名。
+5) 使用中文，语义准确，内容具体。
+
+只返回这两个章节的 Markdown 正文，不要解释，不要代码块。`
+}
+
+// Part B: 数据字典（一批表）
+export function getDocDictionaryPrompt(databaseType: string, batchIndex: number, totalBatches: number): string {
+  return `你是一个资深数据库文档工程师。
+请根据用户消息中的表结构数据，生成这批表的"数据字典"章节内容。
+这是第 ${batchIndex + 1}/${totalBatches} 批。
+
+生成规则：
+1) 只输出数据字典章节内容，不要输出其他章节。
+2) 每张表使用 "### 表：<表名>" 作为小节标题（编号由外部系统统一处理，你无需编号）。
+3) 每个小节后必须有一行"表作用：..."，说明该表的业务用途。
+4) 每个小节必须包含字段表格，表头为：| 字段名 | 中文名/注释 | 类型 | 主键 | 外键 | 可空 | 说明 |
+5) 主键/外键列填"是"或"否"，可空列填"是"或"否"。
+6) "说明"列必须写该字段的业务含义，禁止留空或只重复字段名。
+7) 使用中文，语义准确，内容具体。
+
+只返回数据字典 Markdown 正文，不要解释，不要代码块。`
+}
+
+// Part C: 表关系说明 + 可选建议章节
+export function getDocRelationsPrompt(databaseType: string, tableCount: number): string {
+  return `你是一个资深数据库文档工程师。
+请根据用户消息中的表关系数据，生成"表关系说明"及可选的建议类章节。
+这是文档的最后一个部分。
+
+生成规则：
+1) 必须输出：
+   ## 4. 表关系说明
+2) "表关系说明"必须是 Markdown 表格，表头为：| 源表 | 源字段 | 目标表 | 目标字段 | 关系类型 | 说明 |
+3) "说明"列需描述该关系的业务含义，禁止留空。
+4) 根据数据复杂度自行判断是否输出以下可选章节（有内容则写，无内容则省略）：
+   ## 5. 设计决策说明
+   ## 6. 索引与查询建议
+   ## 7. 安全与数据完整性
+   ## 8. 扩展与迁移建议
+5) 使用中文，语义准确，内容具体。
+
+只返回上述章节的 Markdown 正文，不要解释，不要代码块。`
 }

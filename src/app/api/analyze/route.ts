@@ -8,7 +8,10 @@ import {
   getSchemaDesignPrompt,
   getSqlGenerationPrompt,
   getDocumentGenerationPrompt,
-  getDocumentRepairPrompt
+  getDocumentRepairPrompt,
+  getDocOverviewPrompt,
+  getDocDictionaryPrompt,
+  getDocRelationsPrompt
 } from '@/lib/prompts'
 import {
   splitKeyPointBatches,
@@ -19,7 +22,15 @@ import {
   buildCompactDocInput,
   buildFallbackDesignDocument,
   isDocumentStructured,
-  hasAllTablesCovered
+  hasAllTablesCovered,
+  shouldChunkDoc,
+  splitDocTableBatches,
+  buildOverviewDocInput,
+  buildDictionaryDocInput,
+  buildRelationsDocInput,
+  assembleChunkedDoc,
+  buildDictionaryTemplate,
+  buildRelationsTemplate
 } from '@/lib/doc'
 
 // Allow for longer timeouts
@@ -362,51 +373,149 @@ export async function POST(request: NextRequest) {
 
             if (enableDocGeneration) {
                 await sendEvent('stage_start', { stage: 'doc_generation', message: '正在生成设计文档...' })
-                try {
-                    const docOptions = getDocCallOptions(startedAt)
-                    if (!docOptions) {
-                        const message = '剩余预算不足，已跳过大模型文档生成并返回兜底文档'
+
+                const fallbackDoc = () => buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)
+
+                if (shouldChunkDoc(schemaResult.tables)) {
+                    // === 分段生成（大型系统 >8 表） ===
+                    const docBatches = splitDocTableBatches(schemaResult.tables)
+                    const totalParts = 1 + docBatches.length + 1 // PartA + PartBs + PartC
+                    let partIndex = 0
+
+                    // Part A: 概览 + 实体清单
+                    const partAOptions = getDocCallOptions(startedAt)
+                    if (!partAOptions) {
                         docGenerationResult = {
-                            designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n以下为模板化兜底文档：\n\n${buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)}`
+                            designDocument: `# 设计文档未完整生成\n\n原因：预算不足，已跳过大模型文档生成并返回兜底文档\n\n${fallbackDoc()}`
                         }
-                        await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
+                        await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: '预算不足' })
                     } else {
-                    const compactDocInput = buildCompactDocInput(schemaResult.tables, schemaResult.relations, requirement, optimizationResult.optimizedRequirement)
-                    docGenerationResult = await withStageHeartbeat('doc_generation', () =>
-                      callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), compactDocInput, false, 'designDocument', docOptions)
-                    )
-                    if (!docGenerationResult || typeof docGenerationResult.designDocument !== 'string') {
-                        throw new Error('文档生成阶段返回数据格式错误')
-                    }
-                    const docIsStructured = isDocumentStructured(docGenerationResult.designDocument)
-                    const docHasAllTables = hasAllTablesCovered(docGenerationResult.designDocument, schemaResult.tables)
-                    if (!docIsStructured || !docHasAllTables) {
-                        const repairOptions = getDocCallOptions(startedAt)
-                        if (repairOptions && getRemainingBudgetMs(startedAt) > 18000) {
-                            const repaired = await withStageHeartbeat('doc_generation', () =>
-                              callLLM(config, getDocumentRepairPrompt(docGenerationResult.designDocument), '', false, 'designDocument', repairOptions)
+                        let overviewResult: string
+                        try {
+                            const overviewInput = buildOverviewDocInput(
+                                schemaResult.tables, schemaResult.relations,
+                                requirement, optimizationResult.optimizedRequirement
                             )
-                            if (repaired && typeof repaired.designDocument === 'string' && isDocumentStructured(repaired.designDocument) && hasAllTablesCovered(repaired.designDocument, schemaResult.tables)) {
-                                docGenerationResult = repaired
-                            } else {
-                                docGenerationResult = {
-                                    designDocument: buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)
+                            const overviewResponse = await withStageHeartbeat('doc_generation', () =>
+                              callLLM(config, getDocOverviewPrompt(config.databaseType, schemaResult.tables.length), overviewInput, false, 'designDocument', partAOptions)
+                            )
+                            overviewResult = typeof overviewResponse?.designDocument === 'string'
+                              ? overviewResponse.designDocument.trim()
+                              : ''
+                            if (!overviewResult) throw new Error('概览生成返回空内容')
+                        } catch (error) {
+                            console.warn('[doc_generation] Part A failed, using template overview:', error instanceof Error ? error.message : String(error))
+                            overviewResult = `# 数据库设计文档\n\n## 1. 设计概览\n本设计基于业务需求，共生成 ${schemaResult.tables.length} 张数据表、${schemaResult.relations.length} 组表关系，覆盖核心业务实体及关联关系建模。`
+                        }
+                        partIndex++
+                        await sendEvent('stage_progress', { stage: 'doc_generation', progress: { completed: partIndex, total: totalParts } })
+
+                        // Part B: 数据字典分批
+                        const dictionaryParts: string[] = []
+                        for (let i = 0; i < docBatches.length; i++) {
+                            const batchOpts = getDocCallOptions(startedAt)
+                            if (!batchOpts) {
+                                for (let j = i; j < docBatches.length; j++) {
+                                    dictionaryParts.push(buildDictionaryTemplate(docBatches[j]))
+                                }
+                                break
+                            }
+                            try {
+                                const dictInput = buildDictionaryDocInput(docBatches[i])
+                                const dictResponse = await withStageHeartbeat('doc_generation', () =>
+                                  callLLM(config, getDocDictionaryPrompt(config.databaseType, i, docBatches.length), dictInput, false, 'designDocument', batchOpts)
+                                )
+                                const dictContent = typeof dictResponse?.designDocument === 'string'
+                                  ? dictResponse.designDocument.trim()
+                                  : ''
+                                if (!dictContent) throw new Error('数据字典批次返回空内容')
+                                dictionaryParts.push(dictContent)
+                            } catch (error) {
+                                console.warn(`[doc_generation] Part B batch ${i + 1} failed, using template:`, error instanceof Error ? error.message : String(error))
+                                dictionaryParts.push(buildDictionaryTemplate(docBatches[i]))
+                            }
+                            partIndex++
+                            await sendEvent('stage_progress', { stage: 'doc_generation', progress: { completed: partIndex, total: totalParts } })
+                        }
+
+                        // Part C: 关系说明 + 可选建议章节
+                        let relationsResult: string
+                        const partCOptions = getDocCallOptions(startedAt)
+                        if (!partCOptions) {
+                            relationsResult = buildRelationsTemplate(schemaResult.relations)
+                        } else {
+                            try {
+                                const tableNames = schemaResult.tables.map((t: any) => t.name)
+                                const relInput = buildRelationsDocInput(schemaResult.relations, tableNames)
+                                const relResponse = await withStageHeartbeat('doc_generation', () =>
+                                  callLLM(config, getDocRelationsPrompt(config.databaseType, schemaResult.tables.length), relInput, false, 'designDocument', partCOptions)
+                                )
+                                relationsResult = typeof relResponse?.designDocument === 'string'
+                                  ? relResponse.designDocument.trim()
+                                  : ''
+                                if (!relationsResult) throw new Error('关系说明生成返回空内容')
+                            } catch (error) {
+                                console.warn('[doc_generation] Part C failed, using template:', error instanceof Error ? error.message : String(error))
+                                relationsResult = buildRelationsTemplate(schemaResult.relations)
+                            }
+                        }
+                        partIndex++
+                        await sendEvent('stage_progress', { stage: 'doc_generation', progress: { completed: partIndex, total: totalParts } })
+
+                        // 组装 + 校验完整性
+                        const assembledDoc = assembleChunkedDoc(overviewResult, dictionaryParts, relationsResult, schemaResult.tables)
+                        if (!hasAllTablesCovered(assembledDoc, schemaResult.tables)) {
+                            // 最终兜底：用完整模板补齐
+                            docGenerationResult = { designDocument: fallbackDoc() }
+                        } else {
+                            docGenerationResult = { designDocument: assembledDoc }
+                        }
+                        await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
+                    }
+                } else {
+                    // === 小规模（≤8 表）：走原有单次调用逻辑 ===
+                    try {
+                        const docOptions = getDocCallOptions(startedAt)
+                        if (!docOptions) {
+                            const message = '剩余预算不足，已跳过大模型文档生成并返回兜底文档'
+                            docGenerationResult = {
+                                designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n以下为模板化兜底文档：\n\n${fallbackDoc()}`
+                            }
+                            await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
+                        } else {
+                            const compactDocInput = buildCompactDocInput(schemaResult.tables, schemaResult.relations, requirement, optimizationResult.optimizedRequirement)
+                            docGenerationResult = await withStageHeartbeat('doc_generation', () =>
+                              callLLM(config, getDocumentGenerationPrompt(schemaResult.tables, schemaResult.relations), compactDocInput, false, 'designDocument', docOptions)
+                            )
+                            if (!docGenerationResult || typeof docGenerationResult.designDocument !== 'string') {
+                                throw new Error('文档生成阶段返回数据格式错误')
+                            }
+                            const docIsStructured = isDocumentStructured(docGenerationResult.designDocument)
+                            const docHasAllTables = hasAllTablesCovered(docGenerationResult.designDocument, schemaResult.tables)
+                            if (!docIsStructured || !docHasAllTables) {
+                                const repairOptions = getDocCallOptions(startedAt)
+                                if (repairOptions && getRemainingBudgetMs(startedAt) > 18000) {
+                                    const repaired = await withStageHeartbeat('doc_generation', () =>
+                                      callLLM(config, getDocumentRepairPrompt(docGenerationResult.designDocument), '', false, 'designDocument', repairOptions)
+                                    )
+                                    if (repaired && typeof repaired.designDocument === 'string' && isDocumentStructured(repaired.designDocument) && hasAllTablesCovered(repaired.designDocument, schemaResult.tables)) {
+                                        docGenerationResult = repaired
+                                    } else {
+                                        docGenerationResult = { designDocument: fallbackDoc() }
+                                    }
+                                } else {
+                                    docGenerationResult = { designDocument: fallbackDoc() }
                                 }
                             }
-                        } else {
-                            docGenerationResult = {
-                                designDocument: buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)
-                            }
+                            await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
                         }
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : '文档生成超时'
+                        docGenerationResult = {
+                            designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n以下为模板化兜底文档：\n\n${fallbackDoc()}`
+                        }
+                        await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
                     }
-                    await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult })
-                    }
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : '文档生成超时'
-                    docGenerationResult = {
-                        designDocument: `# 设计文档未完整生成\n\n原因：${message}\n\n以下为模板化兜底文档：\n\n${buildFallbackDesignDocument(config.databaseType, schemaResult.tables, schemaResult.relations)}`
-                    }
-                    await sendEvent('stage_done', { stage: 'doc_generation', data: docGenerationResult, partial: true, error: message })
                 }
             } else {
                 await sendEvent('stage_start', { stage: 'doc_generation', message: '跳过生成设计文档...' })
