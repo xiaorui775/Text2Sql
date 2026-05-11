@@ -1,8 +1,9 @@
 'use client'
 
-import { useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toPng } from 'html-to-image'
-import { Download, Loader2 } from 'lucide-react'
+import { Download, Loader2, Maximize, Minimize } from 'lucide-react'
+import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
@@ -79,7 +80,7 @@ function estimateTextWidth(text: string, latinWidth: number): number {
   for (const char of text) {
     if (/\s/.test(char)) {
       total += latinWidth * 0.5
-    } else if (/[\u4e00-\u9fff]/.test(char)) {
+    } else if (/[一-鿿]/.test(char)) {
       total += latinWidth * 1.9
     } else if (/[()（）,.:;'"`~!@#$%^&*+=<>?/\\|[\]{}-]/.test(char)) {
       total += latinWidth * 0.9
@@ -92,44 +93,43 @@ function estimateTextWidth(text: string, latinWidth: number): number {
 
 function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   const positions: Record<string, TablePosition> = {}
-  
+
   if (tables.length === 0) return positions
-  
+
   let maxNameWidth = 0
   let maxTypeWidth = 0
-  
+
   tables.forEach(table => {
     maxNameWidth = Math.max(maxNameWidth, estimateTextWidth(getDisplayName(table.name, table.comment), 8))
-    
+
     table.fields.forEach(field => {
       maxNameWidth = Math.max(maxNameWidth, estimateTextWidth(getDisplayName(field.name, field.comment), 7))
       const typeStr = field.type
       maxTypeWidth = Math.max(maxTypeWidth, estimateTextWidth(typeStr, 6))
     })
   })
-  
+
   const padding = 16
   const gap = 12
-  const nameStartX = 48 // Increased to accommodate PK/FK indicators
+  const nameStartX = 48
   const typeX = nameStartX + maxNameWidth + gap
   const tableWidth = Math.max(180, typeX + maxTypeWidth + padding)
-  
-  const rowHeight = ROW_HEIGHT
+
   const headerHeight = HEADER_HEIGHT
   const horizontalGap = 150
   const verticalGap = 100
-  
+
   const tableHeights: Record<string, number> = {}
   tables.forEach(table => {
-    tableHeights[table.name] = headerHeight + table.fields.length * rowHeight + 16
+    tableHeights[table.name] = headerHeight + table.fields.length * ROW_HEIGHT + 16
   })
-  
+
   const cols = Math.ceil(Math.sqrt(tables.length))
-  
+
   tables.forEach((table, index) => {
     const col = index % cols
     const row = Math.floor(index / cols)
-    
+
     positions[table.name] = {
       x: 40 + col * (tableWidth + horizontalGap),
       y: 40 + row * (Math.max(...Object.values(tableHeights)) + verticalGap),
@@ -138,7 +138,7 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
       typeX: typeX
     }
   })
-  
+
   return positions
 }
 
@@ -315,181 +315,233 @@ function getLabelPosition(
 
 export default function ERDiagram({ tables, relations, className, fullHeight = false }: ERDiagramProps) {
   const svgRef = useRef<SVGSVGElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [downloading, setDownloading] = useState(false)
-  
-  const positions = useMemo(() => calculateLayout(tables), [tables])
-  
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // Canvas pan & zoom
+  const [translate, setTranslate] = useState({ x: 0, y: 0 })
+  const [scale, setScale] = useState(1)
+  const isPanning = useRef(false)
+  const panLast = useRef({ x: 0, y: 0 })
+
+  // Table drag — positions stored in state so dragging updates them + relation lines
+  const layoutResult = useMemo(() => calculateLayout(tables), [tables])
+  const [positions, setPositions] = useState<Record<string, TablePosition>>({})
+  const draggingTable = useRef<string | null>(null)
+  const dragOffset = useRef({ x: 0, y: 0 })
+  const [draggingTableName, setDraggingTableName] = useState<string | null>(null)
+
+  useEffect(() => { setPositions(layoutResult) }, [layoutResult])
+
+  const resetView = useCallback(() => {
+    setTranslate({ x: 0, y: 0 })
+    setScale(1)
+  }, [])
+
+  const handleWheelNative = useCallback((e: WheelEvent) => {
+    e.preventDefault()
+    setScale(prev => {
+      const delta = e.deltaY > 0 ? 0.9 : 1.1
+      return Math.min(3, Math.max(0.2, prev * delta))
+    })
+  }, [])
+
+  const canvasRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = canvasRef.current
+    if (!el) return
+    el.addEventListener('wheel', handleWheelNative, { passive: false })
+    return () => el.removeEventListener('wheel', handleWheelNative)
+  }, [handleWheelNative])
+
+  // Convert client coords to SVG coords (accounts for pan/zoom)
+  const clientToSvg = useCallback((clientX: number, clientY: number) => {
+    const svgEl = svgRef.current
+    if (!svgEl) return { x: 0, y: 0 }
+    const pt = svgEl.createSVGPoint()
+    pt.x = clientX
+    pt.y = clientY
+    const ctm = svgEl.getScreenCTM()
+    if (!ctm) return { x: 0, y: 0 }
+    return pt.matrixTransform(ctm.inverse())
+  }, [])
+
+  // Canvas pan: mousedown on empty canvas area
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0 || draggingTable.current) return
+    isPanning.current = true
+    panLast.current = { x: e.clientX, y: e.clientY }
+  }, [])
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (draggingTable.current) {
+      const svgPt = clientToSvg(e.clientX, e.clientY)
+      setPositions(prev => {
+        const p = prev[draggingTable.current!]
+        if (!p) return prev
+        return { ...prev, [draggingTable.current!]: { ...p, x: svgPt.x - dragOffset.current.x, y: svgPt.y - dragOffset.current.y } }
+      })
+      return
+    }
+    if (!isPanning.current) return
+    const dx = e.clientX - panLast.current.x
+    const dy = e.clientY - panLast.current.y
+    panLast.current = { x: e.clientX, y: e.clientY }
+    setTranslate(prev => ({ x: prev.x + dx, y: prev.y + dy }))
+  }, [clientToSvg])
+
+  const handleMouseUp = useCallback(() => {
+    draggingTable.current = null
+    setDraggingTableName(null)
+    isPanning.current = false
+  }, [])
+
+  // Table drag: mousedown on a table element
+  const handleTableMouseDown = useCallback((tableName: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (e.button !== 0) return
+    const pos = positions[tableName]
+    if (!pos) return
+    const svgPt = clientToSvg(e.clientX, e.clientY)
+    draggingTable.current = tableName
+    setDraggingTableName(tableName)
+    dragOffset.current = { x: svgPt.x - pos.x, y: svgPt.y - pos.y }
+  }, [positions, clientToSvg])
+
+  const toggleFullscreen = useCallback(() => {
+    setIsFullscreen(prev => {
+      if (prev) resetView()
+      return !prev
+    })
+  }, [resetView])
+
+  useEffect(() => {
+    if (!isFullscreen) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { resetView(); setIsFullscreen(false) }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [isFullscreen, resetView])
+
   const svgSize = useMemo(() => {
     if (Object.keys(positions).length > 0) {
       const maxX = Math.max(...Object.values(positions).map(p => p.x + p.width))
       const maxY = Math.max(...Object.values(positions).map(p => p.y + p.height))
-      return {
-        width: Math.max(800, maxX + 120),
-        height: Math.max(500, maxY + 100)
-      }
+      return { width: Math.max(800, maxX + 120), height: Math.max(500, maxY + 100) }
     }
     return { width: 800, height: 500 }
   }, [positions])
-  
+
   const handleDownload = async () => {
     if (svgRef.current === null || downloading) return
-
     setDownloading(true)
     try {
       const container = svgRef.current.parentElement
       if (!container) return
-
-      const originalMaxHeight = container.style.maxHeight
-      const originalOverflow = container.style.overflow
-      const originalWidth = container.style.width
-      const originalHeight = container.style.height
-
-      container.style.maxHeight = 'none'
-      container.style.overflow = 'visible'
-      container.style.width = `${svgSize.width}px`
-      container.style.height = `${svgSize.height}px`
-
-      await new Promise(resolve => setTimeout(resolve, 100))
-
-      const dataUrl = await toPng(container, { 
-        backgroundColor: '#ffffff',
-        width: svgSize.width,
-        height: svgSize.height,
-        pixelRatio: 2,
-      })
-      
-      container.style.maxHeight = originalMaxHeight
-      container.style.overflow = originalOverflow
-      container.style.width = originalWidth
-      container.style.height = originalHeight
-      
-      const link = document.createElement('a')
-      link.download = 'er-diagram.png'
-      link.href = dataUrl
-      link.click()
+      const orig = { maxH: container.style.maxHeight, overflow: container.style.overflow, w: container.style.width, h: container.style.height }
+      container.style.maxHeight = 'none'; container.style.overflow = 'visible'
+      container.style.width = `${svgSize.width}px`; container.style.height = `${svgSize.height}px`
+      await new Promise(r => setTimeout(r, 100))
+      const dataUrl = await toPng(container, { backgroundColor: '#ffffff', width: svgSize.width, height: svgSize.height, pixelRatio: 2 })
+      container.style.maxHeight = orig.maxH; container.style.overflow = orig.overflow
+      container.style.width = orig.w; container.style.height = orig.h
+      const link = document.createElement('a'); link.download = 'er-diagram.png'; link.href = dataUrl; link.click()
       toast.success('ER图下载成功')
-    } catch (err) {
-      console.error('Failed to download image:', err)
-      toast.error('下载图片失败')
-    } finally {
-      setDownloading(false)
-    }
+    } catch { toast.error('下载图片失败') }
+    finally { setDownloading(false) }
   }
 
   if (tables.length === 0) {
-    return (
-      <div className={cn("flex items-center justify-center h-[300px] text-slate-400", className)}>
-        暂无数据
-      </div>
-    )
+    return (<div className={cn("flex items-center justify-center h-[300px] text-slate-400", className)}>暂无数据</div>)
   }
-  
-  return (
-    <div className={cn("relative group/container", className)}>
-      <div className="absolute top-4 right-4 z-10 opacity-0 group-hover/container:opacity-100 transition-opacity duration-300">
+
+  const svgContent = () => (
+    <svg ref={svgRef} width={svgSize.width} height={svgSize.height}
+      style={{ transform: `translate(${translate.x}px, ${translate.y}px) scale(${scale})`, transformOrigin: '0 0' }}
+    >
+      <defs>
+        <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor="#10b981" /><stop offset="100%" stopColor="#14b8a6" />
+        </linearGradient>
+      </defs>
+      <g className="relations">
+        {relations.map((relation, index) => {
+          const endpoints = getRelationEndpoints(relation, positions, tables)
+          if (!endpoints) return null
+          const curve = getRelationCurve(endpoints)
+          const color = getRelationColor(relation.relationType)
+          return (<g key={index}><path d={`M ${curve.fromX} ${curve.fromY} Q ${curve.control1X} ${curve.control1Y} ${curve.midX} ${curve.midY} Q ${curve.control2X} ${curve.control2Y} ${curve.toX} ${curve.toY}`} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" strokeDasharray={relation.relationType === 'N:M' ? '5,5' : 'none'} style={{ opacity: 0.7 }} /></g>)
+        })}
+      </g>
+      <g className="tables">
+        {tables.map((table) => {
+          const pos = positions[table.name]
+          if (!pos) return null
+          const isDraggingThis = draggingTableName === table.name
+          return (
+            <g key={table.name} transform={`translate(${pos.x}, ${pos.y})`}
+              style={{ cursor: isDraggingThis ? 'grabbing' : 'grab' }}
+              onMouseDown={(e) => handleTableMouseDown(table.name, e)}
+            >
+              <rect x="2" y="2" width={pos.width} height={pos.height} rx="8" fill="rgba(0,0,0,0.1)" className="blur-sm" />
+              <rect width={pos.width} height={pos.height} rx="8" fill="white" stroke={isDraggingThis ? '#10b981' : '#e2e8f0'} strokeWidth={isDraggingThis ? 2 : 1} />
+              <rect width={pos.width} height="40" rx="8" fill="url(#headerGradient)" />
+              <rect y="32" width={pos.width} height="8" fill="url(#headerGradient)" />
+              <text x="16" y="26" fontSize="14" fontWeight="600" fill="white">{getDisplayName(table.name, table.comment)}</text>
+              {table.fields.map((field, fi) => (
+                <g key={field.name}>
+                  <rect y={40 + fi * 28} width={pos.width} height="28" fill={fi % 2 === 0 ? 'transparent' : 'rgba(241, 245, 249, 0.5)'} />
+                  {field.isPrimary && <text x={12} y={40 + fi * 28 + 19} fontSize="10" fontWeight="700" fill="#059669" fontFamily="monospace">PK</text>}
+                  {field.isForeign && <text x={field.isPrimary ? 30 : 12} y={40 + fi * 28 + 19} fontSize="10" fontWeight="700" fill="#3b82f6" fontFamily="monospace">FK</text>}
+                  <text x={48} y={40 + fi * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{getDisplayName(field.name, field.comment)}</text>
+                  <text x={pos.typeX} y={40 + fi * 28 + 20} fontSize="10" fill="#94a3b8" textAnchor="start">{field.type}</text>
+                </g>
+              ))}
+            </g>
+          )
+        })}
+      </g>
+      <g className="relation-labels">
+        {relations.map((relation, index) => {
+          const endpoints = getRelationEndpoints(relation, positions, tables)
+          if (!endpoints) return null
+          const curve = getRelationCurve(endpoints)
+          const labelPos = getLabelPosition(curve, positions)
+          const color = getRelationColor(relation.relationType)
+          return (<g key={index}><rect x={labelPos.x - LABEL_WIDTH / 2} y={labelPos.y - LABEL_HEIGHT / 2} width={LABEL_WIDTH} height={LABEL_HEIGHT} rx="4" fill="white" stroke={color} strokeWidth="1" /><text x={labelPos.x} y={labelPos.y + 4} textAnchor="middle" fontSize="11" fontWeight="600" fill={color}>{getRelationLabel(relation.relationType)}</text></g>)
+        })}
+      </g>
+      <g className="relation-dots">
+        {relations.map((relation, index) => {
+          const endpoints = getRelationEndpoints(relation, positions, tables)
+          if (!endpoints) return null
+          const { fromX, fromY, toX, toY } = endpoints
+          const color = getRelationColor(relation.relationType)
+          return (<g key={`dot-${index}`}><circle cx={fromX} cy={fromY} r="4" fill={color} /><circle cx={toX} cy={toY} r="4" fill={color} /></g>)
+        })}
+      </g>
+    </svg>
+  )
+
+  const diagramContent = (isFullscreenMode: boolean) => (
+    <div className={cn("relative group/container", isFullscreenMode ? "fixed inset-0 z-50 bg-white" : className)} ref={containerRef}>
+      <div className={cn("absolute top-4 right-4 z-10 flex items-center gap-2", isFullscreenMode ? "opacity-100" : "opacity-0 group-hover/container:opacity-100 transition-opacity duration-300")}>
+        {isFullscreenMode && (<span className="text-xs text-slate-400 mr-1 select-none">拖拽表调整位置 · 滚轮缩放 · ESC 退出</span>)}
         <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button 
-                variant="outline" 
-                size="icon" 
-                onClick={handleDownload}
-                disabled={downloading}
-                className="bg-white/90 backdrop-blur-sm shadow-md hover:bg-white hover:text-emerald-600 transition-all border-slate-200"
-              >
-                {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent><p>导出图片</p></TooltipContent>
-          </Tooltip>
+          <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" onClick={toggleFullscreen} className="bg-white/90 backdrop-blur-sm shadow-md hover:bg-white hover:text-emerald-600 transition-all border-slate-200">{isFullscreenMode ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}</Button></TooltipTrigger><TooltipContent><p>{isFullscreenMode ? '退出全屏' : '全屏查看'}</p></TooltipContent></Tooltip>
+          <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" onClick={handleDownload} disabled={downloading} className="bg-white/90 backdrop-blur-sm shadow-md hover:bg-white hover:text-emerald-600 transition-all border-slate-200">{downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}</Button></TooltipTrigger><TooltipContent><p>导出图片</p></TooltipContent></Tooltip>
         </TooltipProvider>
       </div>
-      <div className={cn("overflow-auto bg-white rounded-lg border transition-all", fullHeight ? "h-full" : "max-h-[500px]")}>
-        <svg ref={svgRef} width={svgSize.width} height={svgSize.height} className="min-w-full">
-          <g className="relations">
-            {relations.map((relation, index) => {
-              const endpoints = getRelationEndpoints(relation, positions, tables)
-              if (!endpoints) return null
-              const curve = getRelationCurve(endpoints)
-              const color = getRelationColor(relation.relationType)
-
-              return (
-                <g key={index}>
-                  <path
-                    d={`M ${curve.fromX} ${curve.fromY} Q ${curve.control1X} ${curve.control1Y} ${curve.midX} ${curve.midY} Q ${curve.control2X} ${curve.control2Y} ${curve.toX} ${curve.toY}`}
-                    fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-                    strokeDasharray={relation.relationType === 'N:M' ? '5,5' : 'none'}
-                    style={{ opacity: 0.7 }}
-                  />
-                </g>
-              )
-            })}
-          </g>
-          
-          <g className="tables">
-            {tables.map((table) => {
-              const pos = positions[table.name]
-              if (!pos) return null
-              return (
-                <g key={table.name} transform={`translate(${pos.x}, ${pos.y})`}>
-                  <rect x="2" y="2" width={pos.width} height={pos.height} rx="8" fill="rgba(0,0,0,0.1)" className="blur-sm" />
-                  <rect width={pos.width} height={pos.height} rx="8" fill="white" stroke="#e2e8f0" strokeWidth="1" />
-                  <rect width={pos.width} height="40" rx="8" fill="url(#headerGradient)" />
-                  <rect y="32" width={pos.width} height="8" fill="url(#headerGradient)" />
-                  <defs>
-                    <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                      <stop offset="0%" stopColor="#10b981" />
-                      <stop offset="100%" stopColor="#14b8a6" />
-                    </linearGradient>
-                  </defs>
-                  <text x="16" y="26" fontSize="14" fontWeight="600" fill="white">{getDisplayName(table.name, table.comment)}</text>
-                  {table.fields.map((field, fieldIndex) => (
-                    <g key={field.name}>
-                      <rect y={40 + fieldIndex * 28} width={pos.width} height="28" fill={fieldIndex % 2 === 0 ? 'transparent' : 'rgba(241, 245, 249, 0.5)'} />
-                      {field.isPrimary && <text x={12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#059669" fontFamily="monospace">PK</text>}
-                      {field.isForeign && <text x={field.isPrimary ? 30 : 12} y={40 + fieldIndex * 28 + 19} fontSize="10" fontWeight="700" fill="#3b82f6" fontFamily="monospace">FK</text>}
-                      <text x={48} y={40 + fieldIndex * 28 + 20} fontSize="12" fontWeight="500" fill="#1e293b">{getDisplayName(field.name, field.comment)}</text>
-                      <text x={pos.typeX} y={40 + fieldIndex * 28 + 20} fontSize="10" fill="#94a3b8" textAnchor="start">{field.type}</text>
-                    </g>
-                  ))}
-                </g>
-              )
-            })}
-          </g>
-
-          <g className="relation-labels">
-            {relations.map((relation, index) => {
-              const endpoints = getRelationEndpoints(relation, positions, tables)
-              if (!endpoints) return null
-              const curve = getRelationCurve(endpoints)
-              const labelPos = getLabelPosition(curve, positions)
-              const color = getRelationColor(relation.relationType)
-
-              return (
-                <g key={index}>
-                  <rect x={labelPos.x - LABEL_WIDTH / 2} y={labelPos.y - LABEL_HEIGHT / 2} width={LABEL_WIDTH} height={LABEL_HEIGHT} rx="4" fill="white" stroke={color} strokeWidth="1" />
-                  <text x={labelPos.x} y={labelPos.y + 4} textAnchor="middle" fontSize="11" fontWeight="600" fill={color}>{getRelationLabel(relation.relationType)}</text>
-                </g>
-              )
-            })}
-          </g>
-
-          <g className="relation-dots">
-            {relations.map((relation, index) => {
-              const endpoints = getRelationEndpoints(relation, positions, tables)
-              if (!endpoints) return null
-              const { fromX, fromY, toX, toY } = endpoints
-              const color = getRelationColor(relation.relationType)
-              return (
-                <g key={`dot-${index}`}>
-                  <circle cx={fromX} cy={fromY} r="4" fill={color} />
-                  <circle cx={toX} cy={toY} r="4" fill={color} />
-                </g>
-              )
-            })}
-          </g>
-        </svg>
+      <div ref={canvasRef} className={cn("bg-white rounded-lg border transition-all overflow-hidden", isFullscreenMode ? "w-full h-full rounded-none border-0" : fullHeight ? "h-full" : "max-h-[500px]")}
+        onMouseDown={handleCanvasMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
+        style={{ cursor: draggingTableName ? 'default' : 'grab' }}
+      >
+        {svgContent()}
       </div>
     </div>
   )
+
+  return (<>{diagramContent(false)}{isFullscreen && createPortal(diagramContent(true), document.body)}</>)
 }

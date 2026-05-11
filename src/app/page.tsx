@@ -7,8 +7,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2, AlertCircle, FileText, CheckCircle2, CircleDashed } from 'lucide-react'
+import { Loader2, Database, Lightbulb, GitBranch, Copy, Check, Sparkles, Table2, AlertCircle, FileText, CheckCircle2, CircleDashed, Pencil, X } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { Switch } from '@/components/ui/switch'
@@ -17,6 +18,7 @@ import ERDiagram from '@/components/er-diagram'
 import SettingsDialog from '@/components/settings-dialog'
 import { ErrorDialog } from '@/components/error-dialog'
 import DesignDocMarkdown from '@/components/design-doc-markdown'
+import SqlTableEditor from '@/components/sql-table-editor'
 
 interface TableField {
   name: string
@@ -61,12 +63,71 @@ const DATABASE_LABELS: Record<string, string> = {
   clickhouse: 'ClickHouse'
 }
 
+function generateDdl(tables: TableSchema[], relations: TableRelation[], dialect: string): string {
+  const lines: string[] = []
+  const q = (s: string) => {
+    if (['mysql', 'mariadb'].includes(dialect)) return `\`${s}\``
+    if (['postgresql', 'oracle'].includes(dialect)) return `"${s}"`
+    if (dialect === 'sqlserver') return `[${s}]`
+    return s
+  }
+
+  for (const table of tables) {
+    const colLines: string[] = []
+    const pks: string[] = []
+    const fks: string[] = []
+
+    for (const field of table.fields) {
+      let col = `  ${q(field.name)} ${field.type}`
+      if (field.isPrimary && ['mysql', 'mariadb'].includes(dialect)) col += ' AUTO_INCREMENT'
+      if (!field.isNullable) col += ' NOT NULL'
+      if (field.comment && ['mysql', 'mariadb', 'clickhouse'].includes(dialect)) col += ` COMMENT '${field.comment}'`
+      colLines.push(col)
+      if (field.isPrimary) pks.push(field.name)
+    }
+
+    // Table-level PK
+    if (pks.length > 0) {
+      colLines.push(`  PRIMARY KEY (${pks.map(q).join(', ')})`)
+    }
+
+    // Foreign keys from relations
+    for (const rel of relations) {
+      if (rel.fromTable === table.name) {
+        fks.push(rel.fromField)
+        colLines.push(`  FOREIGN KEY (${q(rel.fromField)}) REFERENCES ${q(rel.toTable)}(${q(rel.toField)})`)
+      }
+    }
+
+    let stmt = `CREATE TABLE ${q(table.name)} (\n${colLines.join(',\n')}\n)`
+    if (table.comment && ['mysql', 'mariadb', 'clickhouse'].includes(dialect)) {
+      stmt += ` COMMENT='${table.comment}'`
+    }
+    stmt += ';'
+    lines.push(stmt)
+
+    // PostgreSQL/Oracle COMMENT ON
+    if (['postgresql', 'oracle'].includes(dialect)) {
+      if (table.comment) {
+        lines.push(`COMMENT ON TABLE ${q(table.name)} IS '${table.comment}';`)
+      }
+      for (const field of table.fields) {
+        if (field.comment) {
+          lines.push(`COMMENT ON COLUMN ${q(table.name)}.${q(field.name)} IS '${field.comment}';`)
+        }
+      }
+    }
+  }
+  return lines.join('\n\n')
+}
+
 export default function Home() {
   const [requirement, setRequirement] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [copiedSql, setCopiedSql] = useState(false)
   const [copiedDoc, setCopiedDoc] = useState(false)
+  const [isEditingSql, setIsEditingSql] = useState(false)
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
   const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
   const [currentStage, setCurrentStage] = useState<string>('')
@@ -261,6 +322,26 @@ export default function Home() {
       setTimeout(() => setCopiedSql(false), 2000)
     }
   }, [result?.sqlStatements])
+
+  const handleStartEditSql = useCallback(() => {
+    if (!result?.sqlStatements) return
+    setIsEditingSql(true)
+  }, [result?.sqlStatements])
+
+  const handleCancelEditSql = useCallback(() => {
+    setIsEditingSql(false)
+  }, [])
+
+  const handleSaveSql = useCallback((newTables: TableSchema[], newRelations: TableRelation[]) => {
+    setResult(prev => prev ? {
+      ...prev,
+      tables: newTables,
+      relations: newRelations,
+      sqlStatements: generateDdl(newTables, newRelations, prev.databaseType || 'mysql')
+    } : prev)
+    setIsEditingSql(false)
+    toast.success('表结构已更新，SQL 和 ER 图已同步')
+  }, [])
 
   const copyDoc = useCallback(async () => {
     if (result?.designDocument) {
@@ -539,59 +620,58 @@ export default function Home() {
                   {/* SQL Tab */}
                   <TabsContent value="sql" className="mt-0 flex-1 overflow-hidden flex flex-col min-h-0">
                     <div className="relative flex-1 flex flex-col min-h-0">
-                      {/* Database Type Badge */}
-                      {result.databaseType && (
-                        <div className="absolute right-2 top-2 z-20 flex items-center gap-2">
+                      <div className="absolute right-2 top-2 z-20 flex items-center gap-2">
+                        {result.databaseType && (
                           <Badge variant="secondary" className="bg-slate-700 text-slate-200">
                             {DATABASE_LABELS[result.databaseType] || result.databaseType}
                           </Badge>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={copySql}
-                            className="bg-slate-800/80 hover:bg-slate-700 text-white"
-                          >
-                            {copiedSql ? (
-                              <Check className="w-4 h-4 text-emerald-400" />
-                            ) : (
-                              <Copy className="w-4 h-4" />
-                            )}
-                          </Button>
-                        </div>
-                      )}
-                      {!result.databaseType && result.sqlStatements && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={copySql}
-                          className="absolute right-2 top-2 z-10 bg-slate-800/80 hover:bg-slate-700 text-white"
-                        >
-                          {copiedSql ? (
-                            <Check className="w-4 h-4 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-4 h-4" />
-                          )}
-                        </Button>
-                      )}
-                      <div className="flex-1 overflow-auto rounded-lg min-h-0 bg-[#1e1e1e] flex flex-col">
-                         {result.sqlStatements ? (
-                            <SyntaxHighlighter
-                              language="sql"
-                              style={vscDarkPlus}
-                              customStyle={{
-                                margin: 0,
-                                borderRadius: '0.5rem',
-                                fontSize: '0.875rem',
-                                minHeight: '100%'
-                              }}
+                        )}
+                        {result.sqlStatements && !isLoading && (
+                          <>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={handleStartEditSql}
+                              className="bg-slate-800/80 hover:bg-slate-700 text-white"
+                              title="编辑表结构"
                             >
-                              {result.sqlStatements}
-                            </SyntaxHighlighter>
-                         ) : (
-                            <div className="flex items-center justify-center flex-1 text-slate-400">
-                                {isLoading ? "等待 SQL 生成..." : "暂无 SQL"}
-                            </div>
-                         )}
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={copySql}
+                              className="bg-slate-800/80 hover:bg-slate-700 text-white"
+                              title="复制 SQL"
+                            >
+                              {copiedSql ? (
+                                <Check className="w-4 h-4 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-4 h-4" />
+                              )}
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex-1 overflow-auto rounded-lg min-h-0 bg-[#1e1e1e]">
+                        {result.sqlStatements ? (
+                          <SyntaxHighlighter
+                            language="sql"
+                            style={vscDarkPlus}
+                            customStyle={{
+                              margin: 0,
+                              borderRadius: '0.5rem',
+                              fontSize: '0.875rem',
+                              minHeight: '100%'
+                            }}
+                          >
+                            {result.sqlStatements}
+                          </SyntaxHighlighter>
+                        ) : (
+                          <div className="flex items-center justify-center flex-1 text-slate-400">
+                              {isLoading ? "等待 SQL 生成..." : "暂无 SQL"}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </TabsContent>
@@ -654,11 +734,31 @@ export default function Home() {
         </footer>
       </div>
       {/* Error Dialog */}
-      <ErrorDialog 
-        open={errorDialog.open} 
+      <ErrorDialog
+        open={errorDialog.open}
         onOpenChange={(open) => setErrorDialog(prev => ({ ...prev, open }))}
         message={errorDialog.message}
       />
+
+      {/* Pre-mounted editor modal — always in DOM, toggled via CSS */}
+      {result && (
+        <div
+          className={cn(
+            "fixed inset-0 z-50 flex items-center justify-center transition-all duration-200",
+            isEditingSql ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+          )}
+        >
+          <div className="absolute inset-0 bg-black/50" onClick={handleCancelEditSql} />
+          <div className="relative z-10 w-[90vw] max-w-5xl h-[85vh] bg-white dark:bg-slate-900 rounded-xl shadow-2xl flex flex-col overflow-hidden border border-slate-200 dark:border-slate-700">
+            <SqlTableEditor
+              tables={result.tables}
+              relations={result.relations}
+              onSave={handleSaveSql}
+              onCancel={handleCancelEditSql}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
