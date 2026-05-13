@@ -1,3 +1,4 @@
+import { jsonrepair } from 'jsonrepair'
 import type { TableSchema, TableRelation } from './types'
 
 export function extractBalancedJsonObject(input: string): string | null {
@@ -46,53 +47,12 @@ export function extractBalancedJsonObject(input: string): string | null {
     }
   }
 
-  // 如果 JSON 不完整，尝试修复
+  // 如果 JSON 不完整，返回已提取部分
   if (depth > 0) {
-    let fixed = text.slice(startIndex)
-    // 移除末尾的逗号
-    fixed = fixed.replace(/,\s*$/, '')
-    // 补全缺失的括号
-    while (stack.length > 0) {
-      const closer = stack.pop()
-      if (closer) fixed += closer
-    }
-    return fixed
+    return text.slice(startIndex)
   }
 
   return null
-}
-
-export function aggressiveJsonFix(input: string): string | null {
-  let text = input.trim()
-
-  // 移除 markdown 代码块
-  text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '')
-
-  // 提取 JSON 对象
-  const extracted = extractBalancedJsonObject(text)
-  if (!extracted) return null
-
-  let fixed = extracted
-
-  // 修复常见的 JSON 语法错误
-  // 1. 移除对象/数组末尾的逗号
-  fixed = fixed.replace(/,(\s*[}\]])/g, '$1')
-
-  // 2. 修复未闭合的字符串（在逗号或括号前）
-  fixed = fixed.replace(/("[^"]*?)(\n|$)/g, (match, p1) => {
-    if (!p1.endsWith('"')) return p1 + '"'
-    return match
-  })
-
-  // 3. 移除注释
-  fixed = fixed.replace(/\/\*[\s\S]*?\*\//g, '')
-  fixed = fixed.replace(/\/\/.*/g, '')
-
-  // 4. 修复中文标点
-  fixed = fixed.replace(/，/g, ',')
-  fixed = fixed.replace(/：/g, ':')
-
-  return fixed
 }
 
 export function parseStructuredJsonContent(raw: string): any {
@@ -109,25 +69,29 @@ export function parseStructuredJsonContent(raw: string): any {
     }
   }
 
-  // 尝试多种修复策略
-  const candidates = [
-    cleanedContent,
-    cleanedContent.replace(/,\s*([}\]])/g, '$1'), // 移除末尾逗号
-    aggressiveJsonFix(cleanedContent) // 激进修复
-  ].filter(Boolean) as string[]
+  // 提取 JSON 对象（处理 LLM 可能返回的额外文本）
+  const extracted = extractBalancedJsonObject(cleanedContent)
+  const candidate = extracted || cleanedContent
 
-  // 尝试解析每个候选
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate)
-      // 验证解析结果是否为对象
-      if (parsed && typeof parsed === 'object') {
-        return parsed
-      }
-    } catch (e) {
-      // 继续尝试下一个候选
-      continue
+  // 尝试直接解析
+  try {
+    const parsed = JSON.parse(candidate)
+    if (parsed && typeof parsed === 'object') {
+      return parsed
     }
+  } catch (e) {
+    // 继续尝试修复
+  }
+
+  // 使用 jsonrepair 修复
+  try {
+    const repaired = jsonrepair(candidate)
+    const parsed = JSON.parse(repaired)
+    if (parsed && typeof parsed === 'object') {
+      return parsed
+    }
+  } catch (e) {
+    console.error('jsonrepair failed:', e instanceof Error ? e.message : String(e))
   }
 
   throw new Error('Failed to parse LLM response as JSON')

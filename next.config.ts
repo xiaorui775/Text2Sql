@@ -7,7 +7,11 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  devIndicators: false
+  devIndicators: false,
+  // 启用 instrumentation hook
+  experimental: {
+    instrumentationHook: true,
+  },
 };
 
 export default nextConfig;

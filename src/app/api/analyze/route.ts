@@ -62,6 +62,15 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // 输入长度限制
+    const MAX_REQUIREMENT_LENGTH = 10000
+    if (requirement.length > MAX_REQUIREMENT_LENGTH) {
+      return NextResponse.json(
+        { error: `需求描述过长，请控制在 ${MAX_REQUIREMENT_LENGTH} 字符以内` },
+        { status: 400 }
+      )
+    }
+
     // 获取 LLM 配置
     const llmConfig = await db.lLMConfig.findFirst({
       where: { isActive: true }

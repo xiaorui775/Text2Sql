@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { encrypt, decrypt } from '@/lib/encryption'
 
 // GET - 获取 LLM 配置列表
 export async function GET() {
@@ -16,22 +17,20 @@ export async function GET() {
       })
     }
 
-    // 处理配置列表，不再掩码 API Key，由前端控制显示
+    // 解密 API Key 后返回
     const safeConfigs = configs.map(config => ({
       id: config.id,
       name: config.name || 'Default Config',
       provider: config.provider,
-      apiKey: config.apiKey || '', // 返回完整 Key
+      apiKey: config.apiKey ? decrypt(config.apiKey) : '',
       hasApiKey: !!config.apiKey,
       baseUrl: config.baseUrl || '',
       model: config.model,
       temperature: config.temperature,
       maxTokens: config.maxTokens,
       isActive: config.isActive,
-      // 数据库类型现在作为全局配置返回，这里仅保留兼容性
     }))
 
-    // 获取当前激活配置的数据库类型，如果未激活则取第一个
     const activeConfig = configs.find(c => c.isActive) || configs[0]
     const databaseType = activeConfig.databaseType || 'mysql'
 
@@ -83,9 +82,9 @@ export async function PUT(request: NextRequest) {
       // 更新或创建配置
       for (const config of configs) {
         const existing = existingConfigMap.get(config.id)
-        
-        // 直接使用前端传来的 apiKey，不再进行特殊掩码判断逻辑
-        const apiKeyToSave = config.apiKey
+
+        // 加密保存 API Key
+        const apiKeyToSave = config.apiKey ? encrypt(config.apiKey) : ''
 
         const configData = {
           name: config.name || 'Config',

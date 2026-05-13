@@ -26,6 +26,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { ChevronLeft, ChevronRight } from "lucide-react"
 
 interface HistoryItem {
   id: string
@@ -49,22 +50,26 @@ export function HistoryList() {
   const [pendingDeleteItem, setPendingDeleteItem] = useState<HistoryItem | null>(null)
   
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [pageSize] = useState(20)
+  const [totalPages, setTotalPages] = useState(0)
 
   const fetchHistory = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/history')
+      const res = await fetch(`/api/history?page=${page}&pageSize=${pageSize}`)
       if (res.ok) {
         const data = await res.json()
         setHistory(data.data)
         setTotal(data.total ?? data.data.length)
+        setTotalPages(data.totalPages ?? 1)
       }
     } catch (error) {
       console.error('Failed to fetch history:', error)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [page, pageSize])
 
   useEffect(() => {
     if (open) {
@@ -132,8 +137,8 @@ export function HistoryList() {
             ) : (
               <div className="space-y-4">
                 {history.map((item) => (
-                  <div 
-                    key={item.id} 
+                  <div
+                    key={item.id}
                     className="border rounded-lg p-4 space-y-3 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors cursor-pointer"
                     onClick={() => {
                       setSelectedItem(item)
@@ -160,7 +165,7 @@ export function HistoryList() {
                         </Button>
                       </div>
                     </div>
-                    
+
                     <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                       <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
                         <Clock className="h-3 w-3" />
@@ -180,6 +185,30 @@ export function HistoryList() {
               </div>
             )}
           </ScrollArea>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-2 mt-4 pt-4 border-t">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={page === 1 || loading}
+                onClick={() => setPage(p => p - 1)}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="text-sm text-muted-foreground">
+                {page} / {totalPages}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={page === totalPages || loading}
+                onClick={() => setPage(p => p + 1)}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
         </SheetContent>
       </Sheet>
 
