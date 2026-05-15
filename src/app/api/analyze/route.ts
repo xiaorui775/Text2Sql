@@ -40,20 +40,15 @@ export async function POST(request: NextRequest) {
   let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 
   try {
-    const toBoolean = (value: unknown, fallback: boolean) => {
-      if (typeof value === 'boolean') return value
-      if (typeof value === 'string') {
-        const normalized = value.trim().toLowerCase()
-        if (normalized === 'true') return true
-        if (normalized === 'false') return false
-      }
-      return fallback
-    }
-
     const body = await request.json()
     const { requirement, options } = body
-    const enableOptimization = toBoolean(options?.enableOptimization, true)
-    const enableDocGeneration = toBoolean(options?.enableDocGeneration, true)
+    const toBool = (v: unknown, fb: boolean) => {
+      if (typeof v === 'boolean') return v
+      if (typeof v === 'string') { const n = v.trim().toLowerCase(); if (n === 'true') return true; if (n === 'false') return false }
+      return fb
+    }
+    const enableOptimization = toBool(options?.enableOptimization, true)
+    const enableDocGeneration = toBool(options?.enableDocGeneration, true)
 
     if (!requirement || typeof requirement !== 'string') {
       return NextResponse.json(

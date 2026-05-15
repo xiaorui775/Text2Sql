@@ -15,7 +15,17 @@ export async function GET(request: NextRequest) {
           createdAt: 'desc'
         },
         skip,
-        take: pageSize
+        take: pageSize,
+        select: {
+          id: true,
+          question: true,
+          databaseType: true,
+          provider: true,
+          model: true,
+          status: true,
+          errorMessage: true,
+          createdAt: true,
+        }
       }),
       db.history.count()
     ])

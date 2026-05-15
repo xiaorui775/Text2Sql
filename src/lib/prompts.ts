@@ -1,6 +1,5 @@
 // 数据库特定的 SQL 语法指南
-export const DATABASE_SYNTAX: Record<string, string> = {
-  mysql: `
+const MYSQL_SYNTAX = `
 - 使用 MySQL 语法
 - 自增主键使用 AUTO_INCREMENT
 - 字符串类型使用 VARCHAR(n)，大文本使用 TEXT
@@ -9,7 +8,10 @@ export const DATABASE_SYNTAX: Record<string, string> = {
 - 引擎推荐使用 InnoDB: ENGINE=InnoDB
 - 字符集推荐 utf8mb4: DEFAULT CHARSET=utf8mb4
 - 示例: CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL COMMENT '用户名') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表';
-`,
+`
+
+export const DATABASE_SYNTAX: Record<string, string> = {
+  mysql: MYSQL_SYNTAX,
   postgresql: `
 - 使用 PostgreSQL 语法
 - 自增主键使用 SERIAL 或 BIGSERIAL
@@ -51,15 +53,8 @@ EXEC sp_addextendedproperty 'MS_Description', '用户表', 'SCHEMA', 'dbo', 'TAB
 COMMENT ON TABLE USERS IS '用户表';
 `,
   mariadb: `
-- 使用 MariaDB 语法（与 MySQL 高度兼容）
-- 自增主键使用 AUTO_INCREMENT
-- 字符串类型使用 VARCHAR(n)，大文本使用 TEXT
-- 日期时间使用 DATETIME、TIMESTAMP
-- 注释使用 COMMENT 关键字
-- 引擎推荐使用 InnoDB: ENGINE=InnoDB
-- 字符集推荐 utf8mb4: DEFAULT CHARSET=utf8mb4
-- 示例: CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100) NOT NULL COMMENT '用户名') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表';
-`,
+- 使用 MariaDB 语法（与 MySQL 高度兼容，但部分高级函数有差异）
+` + MYSQL_SYNTAX.trim(),
   clickhouse: `
 - 使用 ClickHouse 语法
 - 主键使用 PRIMARY KEY，排序使用 ORDER BY

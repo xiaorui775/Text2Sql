@@ -44,7 +44,7 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
       console.error('Failed to parse result JSON:', e)
       return null
     }
-  }, [item])
+  }, [item?.id, item?.result])
 
   const copySql = useCallback(async () => {
     const sql = parsedResult?.sqlStatements

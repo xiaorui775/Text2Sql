@@ -68,11 +68,19 @@ export function getMetrics() {
 
 export const dynamic = 'force-dynamic'
 
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'admin'
+
 export async function GET() {
   return NextResponse.json(getMetrics())
 }
 
-export async function DELETE() {
+export async function DELETE(request: NextRequest) {
+  const authHeader = request.headers.get('authorization')
+  const token = authHeader?.replace('Bearer ', '')
+  if (token !== ADMIN_SECRET) {
+    return NextResponse.json({ error: '未授权' }, { status: 401 })
+  }
+
   metrics.requests = 0
   metrics.successes = 0
   metrics.failures = 0

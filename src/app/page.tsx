@@ -127,6 +127,16 @@ export default function Home() {
   const [result, setResult] = useState<AnalysisResult | null>(null)
   const [copiedSql, setCopiedSql] = useState(false)
   const [copiedDoc, setCopiedDoc] = useState(false)
+  const copiedSqlTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copiedDocTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // cleanup timers on unmount
+  useEffect(() => {
+    return () => {
+      if (copiedSqlTimer.current) clearTimeout(copiedSqlTimer.current)
+      if (copiedDocTimer.current) clearTimeout(copiedDocTimer.current)
+    }
+  }, [])
   const [isEditingSql, setIsEditingSql] = useState(false)
   const [hasConfig, setHasConfig] = useState<boolean | null>(null) // null = loading
   const [errorDialog, setErrorDialog] = useState({ open: false, message: '' })
@@ -319,7 +329,8 @@ export default function Home() {
       await navigator.clipboard.writeText(result.sqlStatements)
       setCopiedSql(true)
       toast.success('SQL已复制到剪贴板')
-      setTimeout(() => setCopiedSql(false), 2000)
+      if (copiedSqlTimer.current) clearTimeout(copiedSqlTimer.current)
+      copiedSqlTimer.current = setTimeout(() => setCopiedSql(false), 2000)
     }
   }, [result?.sqlStatements])
 
@@ -348,7 +359,8 @@ export default function Home() {
       await navigator.clipboard.writeText(result.designDocument)
       setCopiedDoc(true)
       toast.success('设计文档已复制到剪贴板')
-      setTimeout(() => setCopiedDoc(false), 2000)
+      if (copiedDocTimer.current) clearTimeout(copiedDocTimer.current)
+      copiedDocTimer.current = setTimeout(() => setCopiedDoc(false), 2000)
     }
   }, [result?.designDocument])
 
