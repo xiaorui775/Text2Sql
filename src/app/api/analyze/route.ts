@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { decrypt } from '@/lib/encryption'
 import type { LLMConfig, AnalyzeStage } from '@/lib/types'
 import { callLLM, getCallOptions, getDocCallOptions, shouldFallbackToNonStream, getRemainingBudgetMs, HEARTBEAT_INTERVAL_MS } from '@/lib/llm'
 import {
@@ -140,7 +141,7 @@ export async function POST(request: NextRequest) {
         try {
             const config: LLMConfig = {
                 provider: llmConfig.provider,
-                apiKey: llmConfig.apiKey,
+                apiKey: decrypt(llmConfig.apiKey),
                 baseUrl: llmConfig.baseUrl,
                 model: llmConfig.model,
                 temperature: llmConfig.temperature,
