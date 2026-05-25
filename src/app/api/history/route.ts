@@ -19,6 +19,7 @@ export async function GET(request: NextRequest) {
         select: {
           id: true,
           question: true,
+          result: true,
           databaseType: true,
           provider: true,
           model: true,
