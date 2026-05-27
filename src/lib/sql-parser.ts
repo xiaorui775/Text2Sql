@@ -276,3 +276,61 @@ function deduplicateRelations(relations: TableRelation[]): TableRelation[] {
     return true
   })
 }
+
+export function generateDdl(tables: TableSchema[], relations: TableRelation[], dialect: string): string {
+  const lines: string[] = []
+  const q = (s: string) => {
+    if (['mysql', 'mariadb'].includes(dialect)) return `\`${s}\``
+    if (['postgresql', 'oracle'].includes(dialect)) return `"${s}"`
+    if (dialect === 'sqlserver') return `[${s}]`
+    return s
+  }
+
+  for (const table of tables) {
+    const colLines: string[] = []
+    const pks: string[] = []
+    const fks: string[] = []
+
+    for (const field of table.fields) {
+      let col = `  ${q(field.name)} ${field.type}`
+      if (field.isPrimary && ['mysql', 'mariadb'].includes(dialect)) col += ' AUTO_INCREMENT'
+      if (!field.isNullable) col += ' NOT NULL'
+      if (field.comment && ['mysql', 'mariadb', 'clickhouse'].includes(dialect)) col += ` COMMENT '${field.comment}'`
+      colLines.push(col)
+      if (field.isPrimary) pks.push(field.name)
+    }
+
+    // Table-level PK
+    if (pks.length > 0) {
+      colLines.push(`  PRIMARY KEY (${pks.map(q).join(', ')})`)
+    }
+
+    // Foreign keys from relations
+    for (const rel of relations) {
+      if (rel.fromTable === table.name) {
+        fks.push(rel.fromField)
+        colLines.push(`  FOREIGN KEY (${q(rel.fromField)}) REFERENCES ${q(rel.toTable)}(${q(rel.toField)})`)
+      }
+    }
+
+    let stmt = `CREATE TABLE ${q(table.name)} (\n${colLines.join(',\n')}\n)`
+    if (table.comment && ['mysql', 'mariadb', 'clickhouse'].includes(dialect)) {
+      stmt += ` COMMENT='${table.comment}'`
+    }
+    stmt += ';'
+    lines.push(stmt)
+
+    // PostgreSQL/Oracle COMMENT ON
+    if (['postgresql', 'oracle'].includes(dialect)) {
+      if (table.comment) {
+        lines.push(`COMMENT ON TABLE ${q(table.name)} IS '${table.comment}';`)
+      }
+      for (const field of table.fields) {
+        if (field.comment) {
+          lines.push(`COMMENT ON COLUMN ${q(table.name)}.${q(field.name)} IS '${field.comment}';`)
+        }
+      }
+    }
+  }
+  return lines.join('\n\n')
+}

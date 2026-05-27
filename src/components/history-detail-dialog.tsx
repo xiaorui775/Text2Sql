@@ -10,10 +10,10 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
 import { format } from "date-fns"
-import { Clock, Database, Brain, AlertCircle, Copy, Check } from "lucide-react"
+import { Clock, Database, Brain, AlertCircle, Copy, Check, Loader2 } from "lucide-react"
 import ERDiagram from "./er-diagram"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useMemo, useState, useCallback } from "react"
+import { useMemo, useState, useCallback, useEffect } from "react"
 import DesignDocMarkdown from "./design-doc-markdown"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
@@ -24,7 +24,7 @@ interface HistoryDetailDialogProps {
   item: {
     id: string
     question: string
-    result: string
+    result?: string
     databaseType: string
     provider: string
     model: string
@@ -36,15 +36,38 @@ interface HistoryDetailDialogProps {
 
 export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailDialogProps) {
   const [copiedSql, setCopiedSql] = useState(false)
+  const [fullResult, setFullResult] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  // 按需加载 result
+  useEffect(() => {
+    if (!open || !item?.id) {
+      setFullResult(null)
+      return
+    }
+    // 如果已有 result（从列表带过来），直接用
+    if (item.result) {
+      setFullResult(item.result)
+      return
+    }
+    // 否则按需请求
+    setLoading(true)
+    fetch(`/api/history?id=${item.id}`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => { if (data?.result) setFullResult(data.result) })
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [open, item?.id, item?.result])
+
   const parsedResult = useMemo(() => {
-    if (!item?.result) return null
+    if (!fullResult) return null
     try {
-      return JSON.parse(item.result)
+      return JSON.parse(fullResult)
     } catch (e) {
       console.error('Failed to parse result JSON:', e)
       return null
     }
-  }, [item?.id, item?.result])
+  }, [fullResult])
 
   const copySql = useCallback(async () => {
     const sql = parsedResult?.sqlStatements
@@ -66,6 +89,11 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
             <Badge variant={item.status === 'success' ? 'default' : 'destructive'}>
               {item.status === 'success' ? '成功' : '失败'}
             </Badge>
+            {item.provider === 'local' && item.model === 'sql-parser' && (
+              <Badge variant="outline" className="bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400">
+                SQL 解析
+              </Badge>
+            )}
           </DialogTitle>
           <DialogDescription>
             查看详细设计内容
@@ -83,10 +111,15 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
           </div>
           <div className="flex items-center gap-1">
             <Brain className="h-4 w-4" />
-            {item.provider} / {item.model}
+            {item.provider === 'local' && item.model === 'sql-parser' ? 'SQL 解析器' : `${item.provider} / ${item.model}`}
           </div>
         </div>
 
+        {loading ? (
+          <div className="flex-1 flex items-center justify-center">
+            <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
         <Tabs defaultValue="er" className="flex-1 flex flex-col min-h-0">
             <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="requirement">需求</TabsTrigger>
@@ -152,6 +185,7 @@ export function HistoryDetailDialog({ open, onOpenChange, item }: HistoryDetailD
               </TabsContent>
             </div>
           </Tabs>
+        )}
       </DialogContent>
     </Dialog>
   )

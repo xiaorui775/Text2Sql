@@ -151,6 +151,11 @@ export function HistoryList() {
                         <Badge variant={item.status === 'success' ? 'default' : 'destructive'} className="text-xs shrink-0">
                           {item.status === 'success' ? '成功' : '失败'}
                         </Badge>
+                        {item.provider === 'local' && item.model === 'sql-parser' && (
+                          <Badge variant="outline" className="text-xs shrink-0 bg-blue-50 text-blue-600 border-blue-200 dark:bg-blue-900/30 dark:text-blue-400">
+                            SQL 解析
+                          </Badge>
+                        )}
                         <Button
                           size="icon"
                           variant="ghost"
@@ -177,7 +182,7 @@ export function HistoryList() {
                       </div>
                       <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded">
                         <Brain className="h-3 w-3" />
-                        {item.model}
+                        {item.provider === 'local' && item.model === 'sql-parser' ? 'SQL 解析器' : item.model}
                       </div>
                     </div>
                   </div>

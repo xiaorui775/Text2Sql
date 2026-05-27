@@ -76,6 +76,7 @@ const LABEL_HEIGHT = 22
 const LABEL_SAFE_GAP = 8
 
 function estimateTextWidth(text: string, latinWidth: number): number {
+  if (!text) return 0
   let total = 0
   for (const char of text) {
     if (/\s/.test(char)) {
@@ -102,11 +103,11 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
   tables.forEach(table => {
     maxNameWidth = Math.max(maxNameWidth, estimateTextWidth(getDisplayName(table.name, table.comment), 8))
 
-    table.fields.forEach(field => {
+    for (const field of (table.fields || [])) {
       maxNameWidth = Math.max(maxNameWidth, estimateTextWidth(getDisplayName(field.name, field.comment), 7))
-      const typeStr = field.type
+      const typeStr = field.type || ''
       maxTypeWidth = Math.max(maxTypeWidth, estimateTextWidth(typeStr, 6))
-    })
+    }
   })
 
   const padding = 16
@@ -121,7 +122,7 @@ function calculateLayout(tables: TableSchema[]): Record<string, TablePosition> {
 
   const tableHeights: Record<string, number> = {}
   tables.forEach(table => {
-    tableHeights[table.name] = headerHeight + table.fields.length * ROW_HEIGHT + 16
+    tableHeights[table.name] = headerHeight + (table.fields || []).length * ROW_HEIGHT + 16
   })
 
   const cols = Math.ceil(Math.sqrt(tables.length))
@@ -156,9 +157,10 @@ function getRelationLabel(relationType: string) {
 }
 
 function getDisplayName(name: string, comment?: string) {
+  const safeName = name || '-'
   const normalizedComment = (comment || '').trim()
-  if (!normalizedComment || normalizedComment === name) return name
-  return `${name}（${normalizedComment}）`
+  if (!normalizedComment || normalizedComment === safeName) return safeName
+  return `${safeName}（${normalizedComment}）`
 }
 
 function getRelationEndpoints(
@@ -334,6 +336,11 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
 
   useEffect(() => { setPositions(layoutResult) }, [layoutResult])
 
+  // Cleanup RAF on unmount
+  useEffect(() => () => {
+    if (rafId.current) cancelAnimationFrame(rafId.current)
+  }, [])
+
   const resetView = useCallback(() => {
     setTranslate({ x: 0, y: 0 })
     setScale(1)
@@ -343,63 +350,91 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
     e.preventDefault()
     setScale(prev => {
       const delta = e.deltaY > 0 ? 0.9 : 1.1
-      return Math.min(3, Math.max(0.2, prev * delta))
+      return Math.min(5, Math.max(0.1, prev * delta))
     })
   }, [])
 
+  // Callback ref: attach wheel listener to whichever canvas is rendered
   const canvasRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const el = canvasRef.current
-    if (!el) return
-    el.addEventListener('wheel', handleWheelNative, { passive: false })
-    return () => el.removeEventListener('wheel', handleWheelNative)
+  const canvasRefCallback = useCallback((el: HTMLDivElement | null) => {
+    // Clean up old listener
+    if (canvasRef.current) {
+      canvasRef.current.removeEventListener('wheel', handleWheelNative)
+    }
+    canvasRef.current = el
+    if (el) {
+      el.addEventListener('wheel', handleWheelNative, { passive: false })
+    }
   }, [handleWheelNative])
 
-  // Convert client coords to SVG coords (accounts for pan/zoom)
+  // Convert client coords to SVG coords using pure math (no getScreenCTM)
   const clientToSvg = useCallback((clientX: number, clientY: number) => {
-    const svgEl = svgRef.current
-    if (!svgEl) return { x: 0, y: 0 }
-    const pt = svgEl.createSVGPoint()
-    pt.x = clientX
-    pt.y = clientY
-    const ctm = svgEl.getScreenCTM()
-    if (!ctm) return { x: 0, y: 0 }
-    return pt.matrixTransform(ctm.inverse())
-  }, [])
+    const canvas = canvasRef.current
+    if (!canvas) return { x: 0, y: 0 }
+    const rect = canvas.getBoundingClientRect()
+    return {
+      x: (clientX - rect.left - translate.x) / scale,
+      y: (clientY - rect.top - translate.y) / scale
+    }
+  }, [translate, scale])
 
   // Canvas pan: mousedown on empty canvas area
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0 || draggingTable.current) return
+    e.preventDefault()
     isPanning.current = true
     panLast.current = { x: e.clientX, y: e.clientY }
   }, [])
 
-  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+  // Throttle move updates via requestAnimationFrame
+  const rafId = useRef(0)
+  const pendingMove = useRef<{ clientX: number; clientY: number } | null>(null)
+
+  const flushMove = useCallback(() => {
+    rafId.current = 0
+    const mv = pendingMove.current
+    if (!mv) return
+    pendingMove.current = null
+
     if (draggingTable.current) {
-      const svgPt = clientToSvg(e.clientX, e.clientY)
+      const svgPt = clientToSvg(mv.clientX, mv.clientY)
       setPositions(prev => {
         const p = prev[draggingTable.current!]
         if (!p) return prev
         return { ...prev, [draggingTable.current!]: { ...p, x: svgPt.x - dragOffset.current.x, y: svgPt.y - dragOffset.current.y } }
       })
-      return
+    } else if (isPanning.current) {
+      const dx = mv.clientX - panLast.current.x
+      const dy = mv.clientY - panLast.current.y
+      panLast.current = { x: mv.clientX, y: mv.clientY }
+      setTranslate(prev => ({ x: prev.x + dx, y: prev.y + dy }))
     }
-    if (!isPanning.current) return
-    const dx = e.clientX - panLast.current.x
-    const dy = e.clientY - panLast.current.y
-    panLast.current = { x: e.clientX, y: e.clientY }
-    setTranslate(prev => ({ x: prev.x + dx, y: prev.y + dy }))
   }, [clientToSvg])
+
+  const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!draggingTable.current && !isPanning.current) return
+    e.preventDefault()
+    pendingMove.current = { clientX: e.clientX, clientY: e.clientY }
+    if (rafId.current === 0) {
+      rafId.current = requestAnimationFrame(flushMove)
+    }
+  }, [flushMove])
 
   const handleMouseUp = useCallback(() => {
     draggingTable.current = null
     setDraggingTableName(null)
     isPanning.current = false
+    pendingMove.current = null
+    if (rafId.current) {
+      cancelAnimationFrame(rafId.current)
+      rafId.current = 0
+    }
   }, [])
 
   // Table drag: mousedown on a table element
   const handleTableMouseDown = useCallback((tableName: string, e: React.MouseEvent) => {
     e.stopPropagation()
+    e.preventDefault()
     if (e.button !== 0) return
     const pos = positions[tableName]
     if (!pos) return
@@ -409,12 +444,37 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
     dragOffset.current = { x: svgPt.x - pos.x, y: svgPt.y - pos.y }
   }, [positions, clientToSvg])
 
+  const svgSize = useMemo(() => {
+    if (Object.keys(positions).length > 0) {
+      const maxX = Math.max(...Object.values(positions).map(p => p.x + p.width))
+      const maxY = Math.max(...Object.values(positions).map(p => p.y + p.height))
+      return { width: Math.max(800, maxX + 120), height: Math.max(500, maxY + 100) }
+    }
+    return { width: 800, height: 500 }
+  }, [positions])
+
   const toggleFullscreen = useCallback(() => {
     setIsFullscreen(prev => {
-      if (prev) resetView()
-      return !prev
+      if (prev) {
+        resetView()
+        return false
+      }
+      setTimeout(() => {
+        const canvas = canvasRef.current
+        if (!canvas) return
+        const vw = canvas.clientWidth
+        const vh = canvas.clientHeight
+        if (vw === 0 || vh === 0 || svgSize.width === 0 || svgSize.height === 0) return
+        const pad = 60
+        const fitScale = Math.min((vw - pad) / svgSize.width, (vh - pad) / svgSize.height, 2)
+        const fitX = (vw - svgSize.width * fitScale) / 2
+        const fitY = (vh - svgSize.height * fitScale) / 2
+        setScale(fitScale)
+        setTranslate({ x: fitX, y: fitY })
+      }, 50)
+      return true
     })
-  }, [resetView])
+  }, [resetView, svgSize])
 
   useEffect(() => {
     if (!isFullscreen) return
@@ -424,15 +484,6 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [isFullscreen, resetView])
-
-  const svgSize = useMemo(() => {
-    if (Object.keys(positions).length > 0) {
-      const maxX = Math.max(...Object.values(positions).map(p => p.x + p.width))
-      const maxY = Math.max(...Object.values(positions).map(p => p.y + p.height))
-      return { width: Math.max(800, maxX + 120), height: Math.max(500, maxY + 100) }
-    }
-    return { width: 800, height: 500 }
-  }, [positions])
 
   const handleDownload = async () => {
     if (svgRef.current === null || downloading) return
@@ -490,7 +541,7 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
               <rect width={pos.width} height="40" rx="8" fill="url(#headerGradient)" />
               <rect y="32" width={pos.width} height="8" fill="url(#headerGradient)" />
               <text x="16" y="26" fontSize="14" fontWeight="600" fill="white">{getDisplayName(table.name, table.comment)}</text>
-              {table.fields.map((field, fi) => (
+              {(table.fields || []).map((field, fi) => (
                 <g key={field.name}>
                   <rect y={40 + fi * 28} width={pos.width} height="28" fill={fi % 2 === 0 ? 'transparent' : 'rgba(241, 245, 249, 0.5)'} />
                   {field.isPrimary && <text x={12} y={40 + fi * 28 + 19} fontSize="10" fontWeight="700" fill="#059669" fontFamily="monospace">PK</text>}
@@ -534,9 +585,10 @@ export default function ERDiagram({ tables, relations, className, fullHeight = f
           <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" onClick={handleDownload} disabled={downloading} className="bg-white/90 backdrop-blur-sm shadow-md hover:bg-white hover:text-emerald-600 transition-all border-slate-200">{downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}</Button></TooltipTrigger><TooltipContent><p>导出图片</p></TooltipContent></Tooltip>
         </TooltipProvider>
       </div>
-      <div ref={canvasRef} className={cn("bg-white rounded-lg border transition-all overflow-hidden", isFullscreenMode ? "w-full h-full rounded-none border-0" : fullHeight ? "h-full" : "max-h-[500px]")}
+      <div ref={canvasRefCallback} className={cn("bg-white rounded-lg border transition-all overflow-hidden", isFullscreenMode ? "w-full h-full rounded-none border-0" : fullHeight ? "h-full" : "max-h-[500px]")}
         onMouseDown={handleCanvasMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
-        style={{ cursor: draggingTableName ? 'default' : 'grab' }}
+        onDoubleClick={(e) => e.preventDefault()}
+        style={{ cursor: draggingTableName ? 'default' : 'grab', touchAction: 'none', userSelect: 'none' }}
       >
         {svgContent()}
       </div>
